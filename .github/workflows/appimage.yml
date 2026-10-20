@@ -90,7 +90,7 @@ jobs:
           TITLE="RPCS3 Fork - Latest AppImage"
           NOTES="Automated x86_64 AppImage build from commit ${GITHUB_SHA}.
 
-          This rolling release is built from the hookmanuk/rpcs3 fork.
+          This rolling release is built from the nyomen/rpcs3VR fork.
           The assets are replaced after each successful push build."
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
