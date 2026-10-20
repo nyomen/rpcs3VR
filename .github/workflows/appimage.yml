@@ -1,0 +1,111 @@
+name: Build AppImage
+
+on:
+  push:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: appimage-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BUILD_ARTIFACTSTAGINGDIRECTORY: ${{ github.workspace }}/artifacts
+  DEPLOY_APPIMAGE: "true"
+  COMPILER: clang
+  RUN_UNIT_TESTS: "OFF"
+  ARTDIR: /root/artifacts
+  RELEASE_MESSAGE: /rpcs3/GitHubReleaseMessage.txt
+
+jobs:
+  build:
+    name: Linux AppImage (x86_64)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Prepare artifact directory
+        run: mkdir -p "$BUILD_ARTIFACTSTAGINGDIRECTORY"
+
+      - name: Build and package AppImage
+        run: |
+          set -euo pipefail
+
+          docker pull rpcs3/rpcs3-ci-jammy:2.1
+
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/rpcs3" \
+            --env-file .ci/docker.env \
+            -e DEPLOY_APPIMAGE=true \
+            -e COMPILER=clang \
+            -e RUN_UNIT_TESTS=OFF \
+            -e BUILD_ARTIFACTSTAGINGDIRECTORY=/root/artifacts \
+            -e ARTDIR=/root/artifacts \
+            -e RELEASE_MESSAGE=/rpcs3/GitHubReleaseMessage.txt \
+            -v "$BUILD_ARTIFACTSTAGINGDIRECTORY:/root/artifacts" \
+            rpcs3/rpcs3-ci-jammy:2.1 \
+            /rpcs3/.ci/build-linux.sh
+
+      - name: Verify AppImage
+        id: verify
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=("$BUILD_ARTIFACTSTAGINGDIRECTORY"/*.AppImage)
+
+          if (( ${#files[@]} != 1 )); then
+            echo "Expected exactly one AppImage, found ${#files[@]}."
+            ls -lah "$BUILD_ARTIFACTSTAGINGDIRECTORY"
+            exit 1
+          fi
+
+          chmod +x "${files[0]}"
+          echo "file=${files[0]}" >> "$GITHUB_OUTPUT"
+          sha256sum "${files[0]}" | tee "$BUILD_ARTIFACTSTAGINGDIRECTORY/SHA256SUMS.txt"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RPCS3-AppImage-x86_64
+          path: |
+            ${{ env.BUILD_ARTIFACTSTAGINGDIRECTORY }}/*.AppImage
+            ${{ env.BUILD_ARTIFACTSTAGINGDIRECTORY }}/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Publish rolling GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPIMAGE_FILE: ${{ steps.verify.outputs.file }}
+        run: |
+          set -euo pipefail
+
+          TAG="appimage-latest"
+          TITLE="RPCS3 Fork - Latest AppImage"
+          NOTES="Automated x86_64 AppImage build from commit ${GITHUB_SHA}.
+
+          This rolling release is built from the hookmanuk/rpcs3 fork.
+          The assets are replaced after each successful push build."
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Updating existing release: $TAG"
+          else
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TITLE" \
+              --notes "$NOTES" \
+              --prerelease \
+              --target "$GITHUB_SHA"
+          fi
+
+          gh release upload "$TAG" \
+            "$APPIMAGE_FILE" \
+            "$BUILD_ARTIFACTSTAGINGDIRECTORY/SHA256SUMS.txt" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
