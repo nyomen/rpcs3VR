@@ -66,9 +66,14 @@ jobs:
             exit 1
           fi
 
-          chmod +x "${files[0]}"
-          echo "file=${files[0]}" >> "$GITHUB_OUTPUT"
-          sha256sum "${files[0]}" | tee "$BUILD_ARTIFACTSTAGINGDIRECTORY/SHA256SUMS.txt"
+          # Copy the AppImage to a fresh file owned by the runner.
+          appimage="${files[0]}"
+          verified="$RUNNER_TEMP/$(basename "$appimage")"
+
+          install -m 755 "$appimage" "$verified"
+
+          echo "file=$verified" >> "$GITHUB_OUTPUT"
+          sha256sum "$verified" | tee "$BUILD_ARTIFACTSTAGINGDIRECTORY/SHA256SUMS.txt"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
