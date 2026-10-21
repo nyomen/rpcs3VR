@@ -23,7 +23,7 @@ jobs:
       - name: Checkout fork
         uses: actions/checkout@v4
         with:
-          ref: master
+          ref: openxr
           fetch-depth: 0
 
       - name: Merge upstream changes
@@ -35,15 +35,15 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git remote add upstream https://github.com/hookmanuk/rpcs3.git
-          git fetch upstream master
+          git fetch upstream openxr
 
-          if git merge-base --is-ancestor upstream/master HEAD; then
+          if git merge-base --is-ancestor upstream/openxr HEAD; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "Already up to date."
             exit 0
           fi
 
-          if git merge --no-edit upstream/master; then
+          if git merge --no-edit upstream/openxr; then
             if git rev-parse HEAD >/dev/null; then
               echo "changed=true" >> "$GITHUB_OUTPUT"
             fi
@@ -54,10 +54,10 @@ jobs:
 
       - name: Push updated fork
         if: steps.sync.outputs.changed == 'true'
-        run: git push origin master
+        run: git push origin openxr
 
       - name: Trigger AppImage build
         if: steps.sync.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run appimage.yml --ref master
+        run: gh workflow run appimage.yml --ref openxr
