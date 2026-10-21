@@ -7,11 +7,16 @@ CPU_ARCH="${1:-x86_64}"
 if [ "$DEPLOY_APPIMAGE" = "true" ]; then
     DESTDIR=AppDir ninja install
 
-    # Include VR title profiles in the AppImage.
+    # Package VR profiles and documentation.
     mkdir -p AppDir/usr/bin/vr_profiles
     cp -a ../bin/vr_profiles/. AppDir/usr/bin/vr_profiles/
-
-    # Fail the build if the expected profile is missing.
+    
+    cp ../vr-games.md ../vr-settings.md AppDir/usr/bin/
+    
+    mkdir -p AppDir/usr/bin/docs
+    cp -a ../docs/vr-settings AppDir/usr/bin/docs/
+    
+    # Fail early if the expected VR profile is missing.
     test -f AppDir/usr/bin/vr_profiles/BCUS98114.json
 
     curl -fsSLo /usr/bin/linuxdeploy "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-$CPU_ARCH.AppImage"
