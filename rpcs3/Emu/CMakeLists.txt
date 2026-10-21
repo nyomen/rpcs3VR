@@ -742,6 +742,12 @@ endif()
 
 # VR fork: the vendored OpenXR headers use C-style casts in their version macros
 if(NOT MSVC)
-    set_source_files_properties(RSX/VK/VKOpenXR.cpp PROPERTIES COMPILE_OPTIONS "-Wno-old-style-cast")
+    set_source_files_properties(
+       RSX/VK/VKOpenXR.cpp
+       RSX/VK/VKDLSS.cpp
+       RSX/VK/VKFrameGen.cpp
+       RSX/VK/VKGSRenderDLSS.cpp
+       PROPERTIES COMPILE_OPTIONS "-Wno-old-style-cast"
+    )
 endif()
 include(RSX/VK/VKDLSS.cmake) # DLSS test (fork): its sources, -DDLSS_SDK, -DBUILD_DLSS_SELFTEST
