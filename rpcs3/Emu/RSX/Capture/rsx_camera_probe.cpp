@@ -5,6 +5,7 @@
 #include <set>
 #include <map>
 
+#include "vr_profile_path.h"
 #include "Emu/System.h"
 #include "Emu/Memory/vm.h"
 #include "Emu/system_config.h"
@@ -140,16 +141,6 @@ namespace rsx::vr
 			return {};
 #endif
 		}
-
-		std::string vr_profiles_dir()
-        {
-            const std::string appdir = read_env("APPDIR");
-
-            if (!appdir.empty())
-                return appdir + "/usr/bin/vr_profiles/";
-
-            return fs::get_executable_dir() + "vr_profiles/";
-        }
 
 		// The title whose VR profile applies: the running game's; a capture replay has none, RPCS3_REPLAY_TITLE_ID names
 		// one (the DLSS self-test, or a game's capture replayed with its profile).
