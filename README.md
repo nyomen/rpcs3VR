@@ -1,4 +1,4 @@
-RPCS3 VR
+RPCS3 VR - For Linux as Appimage
 =====
 
 This is a fork for a VR version of the RPCS3 Emulator.
