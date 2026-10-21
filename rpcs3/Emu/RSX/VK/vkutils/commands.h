@@ -18,7 +18,8 @@ namespace vk
 		command_pool()  = default;
 		~command_pool() = default;
 
-		void create(vk::render_device& dev, u32 queue_family);
+		void create(vk::render_device& dev, u32 queue_family,
+			VkCommandPoolCreateFlags flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT);
 		void destroy();
 
 		vk::render_device& get_owner() const;
@@ -118,8 +119,11 @@ namespace vk
 		command_pool& get_command_pool() const { return *pool; }
 		u32 get_queue_family() const { return pool->get_queue_family(); }
 		bool is_recording() const { return is_open; }
+		VkPipeline bound_pipeline(VkPipelineBindPoint bind_point) const { return m_bound_pipelines[static_cast<int>(bind_point)]; } // VR fork: push descriptors
 
 		void clear_flags() { flags = 0; }
+		// After vkCmdExecuteCommands the bound pipeline and descriptor sets are undefined.
+		void invalidate_state_cache() { clear_state_cache(); }
 		void set_flag(command_buffer_data_flag flag) { flags |= flag; }
 
 		operator VkCommandBuffer() const

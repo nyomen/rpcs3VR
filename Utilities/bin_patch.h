@@ -20,6 +20,8 @@ namespace patch_key
 	static const std::string patch_version = "Patch Version";
 	static const std::string version = "Version";
 	static const std::string enabled = "Enabled";
+	static const std::string enabled_by_default = "Enabled By Default"; // VR fork: on unless the user's patch config says otherwise
+	static const std::string apply_to_savestates = "Apply To Savestates"; // VR fork: also applied when a savestate is loaded
 	static const std::string config_values = "Configurable Values";
 	static const std::string value = "Value";
 	static const std::string type = "Type";
@@ -119,6 +121,7 @@ public:
 	struct patch_config_values
 	{
 		bool enabled{};
+		bool enabled_set{}; // the patch config file had an explicit Enabled entry
 		std::map<std::string, patch_config_value> config_values;
 	};
 
@@ -137,6 +140,8 @@ public:
 		std::string author{};
 		std::string notes{};
 		std::string source_path{};
+		bool enabled_by_default{};
+		bool apply_to_savestates{}; // VR fork
 		std::map<std::string, patch_config_value> default_config_values;
 
 		// Redundant information for accessibility (see patch_container)

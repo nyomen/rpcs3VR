@@ -20,6 +20,7 @@
 #include "Emu/Cell/SPUThread.h"
 #include "Emu/Cell/SPURecompiler.h"
 #include "Emu/RSX/RSXThread.h"
+#include "Emu/RSX/Capture/rsx_vr_hooks.h" // VR fork
 #include "Emu/Cell/lv2/sys_process.h"
 #include "Emu/Cell/lv2/sys_sync.h"
 #include "Emu/Cell/lv2/sys_prx.h"
@@ -935,7 +936,7 @@ bool Emulator::BootRsxCapture(const std::string& path)
 	g_cfg.video.disable_on_disk_shader_cache.set(true);
 
 	vm::init();
-	vm::reserve_map(vm::main, 0, 0x1FFF0000, vm::page_64k_size);
+	vm::reserve_map(vm::main, 0x10000, 0x1FFF0000, vm::page_64k_size); // Fork fix: from 0x10000 as the game boot (at 0 the replay's first vm::alloc returned 0: "context alloc failed")
 	g_fxo->init(false);
 
 	// Initialize progress dialog
@@ -1360,6 +1361,7 @@ game_boot_result Emulator::Load(const std::string& title_id, bool is_disc_patch,
 			m_ar->serialize(argv.emplace_back(), disc_info, klic.emplace_back(), m_game_dir, hdd1);
 
 			launching_from_disc_archive = is_iso_file(disc_info, nullptr, &launching_from_optical_drive);
+			launching_from_disc_archive = launching_from_disc_archive || rsx::vr::savestate_disc_folder_as_iso(m_games_config.get_path(disc_info), disc_info, argv[0]); // VR fork: folder-made state, ISO in the library
 
 			sys_log.notice("Savestate: is iso archive = %d ('%s')", launching_from_disc_archive, disc_info);
 
@@ -1853,6 +1855,7 @@ game_boot_result Emulator::Load(const std::string& title_id, bool is_disc_patch,
 
 			// Disable incompatible settings
 			fixup_settings(&_psf);
+			rsx::vr::force_vr_resolution(m_title_id); // VR fork: VR profiles are made at 720p
 
 			// Force audio provider
 			if (m_path.ends_with("vsh.self"sv))
@@ -2557,6 +2560,8 @@ game_boot_result Emulator::Load(const std::string& title_id, bool is_disc_patch,
 			sys_log.error("Failed to decrypt SELF: %s", elf_path);
 			return game_boot_result::decryption_error;
 		}
+
+		rsx::vr::dev::dump_elf(elf_file); // VR fork: RPCS3_DUMP_ELF (development)
 
 		// Check EBOOT.BIN (before updates - disc games)
 		ppu_exec_object ppu_exec;

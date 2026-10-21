@@ -341,7 +341,7 @@ namespace rsx
 			auto scale_result = [](u32 value)
 			{
 				const auto scale = get_current_renderer()->resolution_scaling_config.scale_percent;
-				const auto result = (value * 10000ull) / (scale * scale);
+				const auto result = (value * 10000ull) / (scale * get_current_renderer()->resolution_scaling_config.percent_y()); // VR fork: percent_y
 				return std::max(1u, static_cast<u32>(result));
 			};
 
@@ -350,7 +350,7 @@ namespace rsx
 			case CELL_GCM_ZPASS_PIXEL_CNT:
 				if (value)
 				{
-					value = (g_cfg.video.precise_zpass_count) ?
+					value = (precise_zpass_count()) ? // VR fork: profile zcull_approximate
 						scale_result(value) :
 						u16{ umax };
 				}
@@ -429,7 +429,7 @@ namespace rsx
 				return;
 			}
 
-			if (g_cfg.video.relaxed_zcull_sync)
+			if (relaxed_zcull_sync()) // VR fork: profile zcull_relaxed_sync
 			{
 				update(ptimer, 0, true);
 				return;
@@ -467,7 +467,7 @@ namespace rsx
 					ensure(query->pending);
 
 					const bool implemented = (writer.type == CELL_GCM_ZPASS_PIXEL_CNT || writer.type == CELL_GCM_ZCULL_STATS3);
-					const bool have_result = counter.result && !g_cfg.video.precise_zpass_count;
+					const bool have_result = counter.result && !precise_zpass_count(); // VR fork: profile zcull_approximate
 
 					if (implemented && !have_result && query->num_draws)
 					{
@@ -571,7 +571,7 @@ namespace rsx
 					m_next_tsc = m_tsc + min_zcull_tick_us;
 
 					// Schedule a queue flush if needed
-					if (!g_cfg.video.relaxed_zcull_sync && m_critical_reports_in_flight &&
+					if (!relaxed_zcull_sync() && m_critical_reports_in_flight && // VR fork: profile zcull_relaxed_sync
 						front.query && front.query->num_draws && front.query->sync_tag > m_sync_tag)
 					{
 						const auto elapsed = m_tsc - front.query->timestamp;
@@ -607,7 +607,7 @@ namespace rsx
 					ensure(query->pending);
 
 					const bool implemented = (writer.type == CELL_GCM_ZPASS_PIXEL_CNT || writer.type == CELL_GCM_ZCULL_STATS3);
-					const bool have_result = counter.result && !g_cfg.video.precise_zpass_count;
+					const bool have_result = counter.result && !precise_zpass_count(); // VR fork: profile zcull_approximate
 
 					if (!implemented || !query->num_draws || have_result)
 					{

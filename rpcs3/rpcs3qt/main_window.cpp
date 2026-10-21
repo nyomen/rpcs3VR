@@ -101,6 +101,7 @@
 #if defined(__linux__) || defined(__APPLE__) || (defined(_WIN32) && defined(ARCH_X64))
 #define RPCS3_UPDATE_SUPPORTED
 #endif
+#undef RPCS3_UPDATE_SUPPORTED // VR fork: the updater would install the standard RPCS3 over this build
 
 LOG_CHANNEL(gui_log, "GUI");
 
@@ -212,7 +213,7 @@ void main_window::Init()
 	CreateConnects();
 
 	setMinimumSize(350, minimumSizeHint().height());    // seems fine on win 10
-	setWindowTitle(QString::fromStdString("RPCS3 " + rpcs3::get_verbose_version()));
+	setWindowTitle(QString::fromStdString("RPCS3 " + rpcs3::get_version_and_branch())); // VR fork: "0.0.42-vrN-<commit> Alpha"
 
 	Q_EMIT RequestGlobalStylesheetChange();
 	ConfigureGuiFromSettings();

@@ -270,7 +270,7 @@ namespace vk
 		{
 			//NOTE: Like stencil, depth write is meaningless without depth test
 			properties.state.set_depth_mask(REGS(ctx)->depth_write_enabled());
-			properties.state.enable_depth_test(vk::get_compare_func(REGS(ctx)->depth_func()));
+			properties.state.enable_depth_test(vk::get_compare_func(vk::vr_dev_depth_func(REGS(ctx)->depth_func(), REGS(ctx)->color_write_enabled(0)))); // VR fork: probe dev bit 0x100
 		}
 
 		if (REGS(ctx)->cull_face_enabled())
@@ -335,7 +335,7 @@ namespace vk
 			}
 		}
 
-		if (REGS(ctx)->stencil_test_enabled())
+		if (REGS(ctx)->stencil_test_enabled() && !vk::vr_dev_skip_stencil_test(REGS(ctx)->color_write_enabled(0))) // VR fork: probe dev bit 0x200
 		{
 			if (!REGS(ctx)->two_sided_stencil_test_enabled())
 			{
@@ -410,6 +410,8 @@ VKGSRender::VKGSRender(utils::serial* ar) noexcept : GSRender(ar)
 	g_fxo->need<rsx::dma_manager>();
 	g_fxo->need<vk::driver_manager_thread>();
 
+	vr_init_before_instance(); // VR fork: OpenXR before the Vulkan instance (its required extensions)
+
 	if (!m_instance.create("RPCS3"))
 	{
 		rsx_log.fatal("Could not find a Vulkan compatible GPU driver. Your GPU(s) may not support Vulkan, or you need to install the Vulkan runtime and drivers");
@@ -433,6 +435,7 @@ VKGSRender::VKGSRender(utils::serial* ar) noexcept : GSRender(ar)
 
 	bool gpu_found = false;
 	std::string adapter_name = g_cfg.video.vk.adapter;
+	adapter_name = vr_select_adapter(gpus, adapter_name); // VR fork: the GPU the OpenXR runtime names
 
 	display_handle_t display = m_frame->handle();
 
@@ -471,6 +474,7 @@ VKGSRender::VKGSRender(utils::serial* ar) noexcept : GSRender(ar)
 	m_device = const_cast<vk::render_device*>(&m_swapchain->get_device());
 	vk::set_current_renderer(m_swapchain->get_device());
 	vk::init();
+	vr_init_after_device(); // VR fork: the OpenXR session
 
 	m_swapchain_dims.width = m_frame->client_width();
 	m_swapchain_dims.height = m_frame->client_height();
@@ -489,6 +493,7 @@ VKGSRender::VKGSRender(utils::serial* ar) noexcept : GSRender(ar)
 	// Create secondary command_buffer for parallel operations
 	m_secondary_command_buffer_pool.create((*m_device), m_device->get_graphics_queue_family());
 	m_secondary_cb_list.create(m_secondary_command_buffer_pool, vk::command_buffer::access_type_hint::all);
+	vr_init_batching(); // VR fork
 
 	//Occlusion
 	m_occlusion_query_manager = std::make_unique<vk::query_pool_manager>(*m_device, VK_QUERY_TYPE_OCCLUSION, OCCLUSION_MAX_POOL_SIZE);
@@ -635,6 +640,7 @@ VKGSRender::VKGSRender(utils::serial* ar) noexcept : GSRender(ar)
 			m_texture_upload_buffer_ring_info);
 
 	vk::get_overlay_pass<vk::ui_overlay_renderer>()->init(*m_current_command_buffer, m_texture_upload_buffer_ring_info);
+	vr_init_overlays(*m_current_command_buffer); // VR fork: the headset's overlay renderer
 
 	if (shadermode == shader_mode::async_with_interpreter || shadermode == shader_mode::interpreter_only)
 	{
@@ -809,6 +815,8 @@ VKGSRender::~VKGSRender()
 		do_local_task(rsx::FIFO::state::lock_wait);
 	}
 
+	vr_destroy_before_wait(); // VR fork: stop the OpenXR frame thread first
+
 	//Wait for device to finish up with resources
 	vkDeviceWaitIdle(*m_device);
 
@@ -866,6 +874,7 @@ VKGSRender::~VKGSRender()
 	m_frame_context_storage.clear();
 
 	// Textures
+	vr_destroy_resources(); // VR fork
 	m_rtts.destroy();
 	m_texture_cache.destroy();
 
@@ -922,6 +931,8 @@ bool VKGSRender::on_access_violation(u32 address, bool is_writing)
 
 	if (result.num_flushable > 0)
 	{
+		const vr_readback_scope vr_scope{ this, result, address, is_writing }; // VR fork: sections read back, dev timer
+
 		if (g_fxo->get<rsx::dma_manager>().is_current_thread())
 		{
 			// The offloader thread cannot handle flush requests
@@ -1232,6 +1243,7 @@ void VKGSRender::bind_viewport()
 		m_graphics_state.clear(rsx::pipeline_state::zclip_config_state_dirty);
 	}
 
+	if (vr_bind_viewport()) return; // VR fork: multiview, one viewport and scissor per view
 	vkCmdSetViewport(*m_current_command_buffer, 0, 1, &m_viewport);
 	vkCmdSetScissor(*m_current_command_buffer, 0, 1, &m_scissor);
 }
@@ -1306,6 +1318,7 @@ void VKGSRender::clear_surface(u32 mask)
 	{
 		return;
 	}
+	if (vr_shared_target_skipped()) return; // VR fork: profile shared_frame_targets
 
 	//float depth_clear = 1.f;
 	u32   stencil_clear = 0;
@@ -1324,6 +1337,7 @@ void VKGSRender::clear_surface(u32 mask)
 
 	//clip region
 	std::tie(scissor_x, scissor_y, scissor_w, scissor_h) = rsx::clip_region<u16>(fb_width, fb_height, scissor_x, scissor_y, scissor_w, scissor_h, true);
+	const auto vr_right_clear = vr_map_clear_rect(fb_width, fb_height, scissor_x, scissor_y, scissor_w, scissor_h); // VR fork: sub-viewport clears into the HUD box
 	VkClearRect region = { { { scissor_x, scissor_y }, { scissor_w, scissor_h } }, 0, 1 };
 
 	const bool full_frame = (scissor_w == fb_width && scissor_h == fb_height);
@@ -1491,6 +1505,7 @@ void VKGSRender::clear_surface(u32 mask)
 					};
 
 					auto attachment_clear_pass = vk::get_overlay_pass<vk::attachment_clear_pass>();
+					if (!vr_clear_attachments_masked(region.rect, colormask, clear_color, vr_right_clear)) // VR fork: multiview, per eye
 					attachment_clear_pass->run(*m_current_command_buffer, m_draw_fbo, region.rect, colormask, clear_color, get_render_pass());
 				}
 
@@ -1499,6 +1514,7 @@ void VKGSRender::clear_surface(u32 mask)
 		}
 	}
 
+	const VkImageAspectFlags vr_cleared_ds_aspects = static_cast<VkImageAspectFlags>(depth_stencil_mask); // VR fork: the aspects this clear writes
 	if (depth_stencil_mask)
 	{
 		if ((depth_stencil_mask & VK_IMAGE_ASPECT_STENCIL_BIT) &&
@@ -1506,13 +1522,16 @@ void VKGSRender::clear_surface(u32 mask)
 		{
 			// Partial stencil clear. Disables fast stencil clear
 			auto ds = std::get<1>(m_rtts.m_bound_depth_stencil);
-			auto key = vk::get_renderpass_key({ ds });
+			auto key = vk::get_renderpass_key({ ds }, {}, vr_image_view_mask(ds)); // VR fork: both layers of a stereo target
 			auto renderpass = vk::get_renderpass(*m_device, key);
 
-			vk::get_overlay_pass<vk::stencil_clear_pass>()->run(
+			auto* stencil_clear = vk::get_overlay_pass<vk::stencil_clear_pass>();
+			stencil_clear->m_target_view_mask = vr_image_view_mask(ds); // VR fork
+			stencil_clear->run(
 				*m_current_command_buffer, ds, region.rect,
 				depth_stencil_clear_values.depthStencil.stencil,
 				rsx::method_registers.stencil_mask(), renderpass);
+			stencil_clear->m_target_view_mask = 0; // VR fork
 
 			depth_stencil_mask &= ~VK_IMAGE_ASPECT_STENCIL_BIT;
 		}
@@ -1530,15 +1549,18 @@ void VKGSRender::clear_surface(u32 mask)
 		m_rtts.on_write({ update_color, update_color, update_color, update_color }, update_z);
 	}
 
-	if (!clear_descriptors.empty())
+	if (!clear_descriptors.empty() && !vr_clear_attachments(clear_descriptors, region, vr_right_clear)) // VR fork: multiview clears per eye
 	{
 		begin_render_pass();
 		vkCmdClearAttachments(*m_current_command_buffer, ::size32(clear_descriptors), clear_descriptors.data(), 1, &region);
 	}
+
+	vr_after_clear(!clear_descriptors.empty(), full_frame, update_color, update_z, scissor_x, scissor_y, scissor_w, scissor_h, vr_cleared_ds_aspects, vr_right_clear); // VR fork: both eyes see the clear
 }
 
 void VKGSRender::flush_command_queue(bool hard_sync, bool do_not_switch)
 {
+	const gpuprof_sync_timer vr_sync_timer{ this, hard_sync }; // VR fork: dev GPU profiler
 	close_and_submit_command_buffer();
 
 	if (hard_sync)
@@ -1864,6 +1886,7 @@ bool VKGSRender::load_program()
 		);
 
 		properties.renderpass_key = m_current_renderpass_key;
+		vk::dlss_apply_pipeline_props(properties, static_cast<u32>(m_draw_buffers.size())); // DLSS test: the motion attachment's blend state
 		if (m_program &&
 			!m_shader_interpreter.is_interpreter(m_program) &&
 			m_pipeline_properties == properties)
@@ -1991,10 +2014,17 @@ void VKGSRender::load_program_env()
 	const bool is_interpreter = m_shader_interpreter.is_interpreter(m_program);
 
 	const bool update_transform_constants = !!(m_graphics_state & rsx::pipeline_state::transform_constants_dirty);
-	const bool update_fragment_constants = !!(m_graphics_state & rsx::pipeline_state::fragment_constants_dirty);
+	// VR fork, profile fragment_constant_overrides: the fill is redone for an overridden program's draws
+	// and for the first draw after them, so the replaced values never reach another program.
+	const auto* vr_fc_overrides = find_fragment_constant_overrides();
+	const bool update_fragment_constants = !!(m_graphics_state & rsx::pipeline_state::fragment_constants_dirty) ||
+		vr_fc_overrides || std::exchange(m_fragment_constants_overridden, false);
 	const bool update_vertex_env = !!(m_graphics_state & rsx::pipeline_state::vertex_state_dirty);
 	const bool update_fragment_env = !!(m_graphics_state & rsx::pipeline_state::fragment_state_dirty);
-	const bool update_fragment_texture_env = !!(m_graphics_state & rsx::pipeline_state::fragment_texture_state_dirty);
+	rsx::fragment_program_texture_config vr_texture_params; // VR fork: feedback textures shifted by the head rotation since their frame
+	const bool vr_shifted = vr_shift_texture_params(vr_texture_params);
+	const bool vr_was_shifted = std::exchange(m_vr_params_shifted, vr_shifted);
+	const bool update_fragment_texture_env = !!(m_graphics_state & rsx::pipeline_state::fragment_texture_state_dirty) || vr_shifted || vr_was_shifted;
 	const bool update_instruction_buffers = (!!m_interpreter_state && is_interpreter);
 	const bool update_raster_env = (ctx->polygon_stipple_enabled() && !!(m_graphics_state & rsx::pipeline_state::polygon_stipple_pattern_dirty));
 	const bool update_instancing_data = ctx->current_draw_clause.is_trivial_instanced_draw;
@@ -2007,11 +2037,7 @@ void VKGSRender::load_program_env()
 		auto buf = m_vertex_env_ring_info.map<char>(mem, 96);
 
 		m_draw_processor.fill_scale_offset_data(buf, false);
-		m_draw_processor.fill_user_clip_data(buf + 64);
-		*(reinterpret_cast<u32*>(buf + 68)) = ctx->transform_branch_bits();
-		*(reinterpret_cast<f32*>(buf + 72)) = ctx->point_size() * resolution_scaling_config.scale_factor();
-		*(reinterpret_cast<f32*>(buf + 76)) = ctx->clip_min();
-		*(reinterpret_cast<f32*>(buf + 80)) = ctx->clip_max();
+		fill_vertex_env_tail(buf, 0.f); // VR fork: one place for the context layout (vr_hud_vertex_env fills a per-eye copy)
 
 		m_vertex_env_ring_info.unmap();
 		m_vertex_env_dynamic_offset = mem;
@@ -2080,6 +2106,8 @@ void VKGSRender::load_program_env()
 			m_prog_buffer->fill_fragment_constants_buffer({ reinterpret_cast<float*>(buf), fragment_constants_size },
 				*ensure(m_fragment_prog), current_fragment_program, true);
 
+			vr_apply_fragment_constant_overrides(vr_fc_overrides, buf, fragment_constants_size); // VR fork
+
 			m_fragment_constants_ring_info.unmap();
 
 			m_fragment_constants_buffer_info = m_fragment_constants_ring_info.window<16>(m_fragment_constants_dynamic_offset, fragment_constants_size, gpu_limits.maxUniformBufferRange);
@@ -2104,7 +2132,8 @@ void VKGSRender::load_program_env()
 		m_texture_parameters_dynamic_offset = m_fragment_texture_params_ring_info.static_alloc<256, 768>();
 		auto buf = m_fragment_texture_params_ring_info.map(m_texture_parameters_dynamic_offset, 768);
 
-		current_fragment_program.texture_params.write_to(buf, current_fp_metadata.referenced_textures_mask);
+		(vr_shifted ? vr_texture_params : current_fragment_program.texture_params).write_to(buf, // VR fork
+			current_fp_metadata.referenced_textures_mask | (vr_shifted ? m_vr_params_extra_mask : 0));
 		m_fragment_texture_params_ring_info.unmap();
 
 		m_fragment_texture_params_buffer_info = m_fragment_texture_params_ring_info.window<768>(m_texture_parameters_dynamic_offset, 768, gpu_limits.maxUniformBufferRange);
@@ -2244,15 +2273,18 @@ void VKGSRender::upload_transform_constants(const rsx::io_buffer& buffer)
 	const bool is_interpreter = m_shader_interpreter.is_interpreter(m_program);
 	const usz transform_constants_size = (is_interpreter || m_vertex_prog->has_indexed_constants) ? 8192 : m_vertex_prog->constant_ids.size() * 16;
 
+	m_xform_constants_data_size = transform_constants_size; // VR fork: bind_vr_eye_constants clones this allocation per eye
 	if (transform_constants_size)
 	{
-		buffer.reserve(transform_constants_size);
+		buffer.reserve(transform_constants_size + vr_constants_tail_size()); // VR fork: room for the depth remap matrix (DLSS test: and the motion block)
 		auto buf = buffer.data();
 
 		const auto constant_ids = (transform_constants_size == 8192)
 			? std::span<const u16>{}
 			: std::span<const u16>(m_vertex_prog->constant_ids);
 		m_draw_processor.fill_vertex_program_constants_data(buf, constant_ids);
+		scale_offset_constants(buf, constant_ids); // VR fork: profile resolution_scaled_constants
+		vr_write_constants_tail(static_cast<u8*>(buf) + transform_constants_size); // VR fork: the depth remap's identity (DLSS test: the motion block)
 	}
 }
 
@@ -2491,6 +2523,7 @@ void VKGSRender::close_and_submit_command_buffer(vk::fence* pFence, VkSemaphore 
 void VKGSRender::prepare_rtts(rsx::framebuffer_creation_context context)
 {
 	const bool clipped_scissor = (context == rsx::framebuffer_creation_context::context_draw);
+	vr_update_multiview_mode(); // VR fork: multiview stereo on or off with the renderer
 	if (m_current_framebuffer_context == context && !m_graphics_state.test(rsx::rtt_config_dirty) && m_draw_fbo)
 	{
 		// Fast path
@@ -2519,6 +2552,8 @@ void VKGSRender::prepare_rtts(rsx::framebuffer_creation_context context)
 		return;
 	}
 
+	bool vr_early_copies = vr_before_prepare_rtts(); // VR fork: copies for surfaces the game reads back
+
 	m_rtts.prepare_render_target(*m_current_command_buffer,
 		m_framebuffer_layout.color_format, m_framebuffer_layout.depth_format,
 		m_framebuffer_layout.width, m_framebuffer_layout.height,
@@ -2526,6 +2561,8 @@ void VKGSRender::prepare_rtts(rsx::framebuffer_creation_context context)
 		m_framebuffer_layout.color_addresses, m_framebuffer_layout.zeta_address,
 		m_framebuffer_layout.actual_color_pitch, m_framebuffer_layout.actual_zeta_pitch,
 		resolution_scaling_config);
+
+	vr_prepare_right_rtts(); // VR fork: the right eye's target set
 
 	// Reset framebuffer information
 	const auto color_bpp = get_format_block_size_in_bytes(m_framebuffer_layout.color_format);
@@ -2540,6 +2577,7 @@ void VKGSRender::prepare_rtts(rsx::framebuffer_creation_context context)
 			m_texture_cache.set_memory_read_flags(rsx_range, rsx::memory_read_flags::flush_once);
 			m_texture_cache.flush_if_cache_miss_likely(*m_current_command_buffer, rsx_range);
 		}
+		vr_early_copies |= vr_copy_readback_sections(m_surface_info[i]); // VR fork
 
 		m_surface_info[i].address = m_surface_info[i].pitch = 0;
 		m_surface_info[i].width = m_framebuffer_layout.width;
@@ -2565,6 +2603,8 @@ void VKGSRender::prepare_rtts(rsx::framebuffer_creation_context context)
 		m_depth_surface_info.bpp = get_format_block_size_in_bytes(m_framebuffer_layout.depth_format);
 		m_depth_surface_info.samples = samples;
 	}
+
+	vr_submit_early_copies(vr_early_copies); // VR fork
 
 	// Bind created rtts as current fbo...
 	const auto draw_buffers = rsx::utility::get_rtt_indexes(m_framebuffer_layout.target);
@@ -2692,7 +2732,7 @@ void VKGSRender::prepare_rtts(rsx::framebuffer_creation_context context)
 		std::iota(input_attachments.begin(), input_attachments.end(), 0);
 	}
 
-	m_current_renderpass_key = vk::get_renderpass_key(m_fbo_images, input_attachments);
+	m_current_renderpass_key = vr_renderpass_key(input_attachments); // VR fork: multiview (DLSS test: the motion attachment)
 	m_cached_renderpass = vk::get_renderpass(*m_device, m_current_renderpass_key);
 
 	// Search old framebuffers for this same configuration
@@ -2704,7 +2744,7 @@ void VKGSRender::prepare_rtts(rsx::framebuffer_creation_context context)
 		m_draw_fbo->release();
 	}
 
-	m_draw_fbo = vk::get_framebuffer(*m_device, fbo_width, fbo_height, vk::to_bool32(!input_attachments.empty()), m_cached_renderpass, m_fbo_images);
+	m_draw_fbo = vk::get_framebuffer(*m_device, fbo_width, fbo_height, vk::to_bool32(!input_attachments.empty()), m_cached_renderpass, vr_framebuffer_images(), m_vr_draw_view_mask, 0, m_vr_draw_view_mask ? 2 : 0); // VR fork: both layers (DLSS test: the motion attachment)
 	m_draw_fbo->add_ref();
 
 	set_viewport();
@@ -2730,15 +2770,19 @@ void VKGSRender::renderctl(u32 request_code, void* args)
 	}
 }
 
-bool VKGSRender::scaled_image_from_memory(const rsx::blit_src_info& src, const rsx::blit_dst_info& dst, bool interpolate)
+bool VKGSRender::scaled_image_from_memory(const rsx::blit_src_info& src_in, const rsx::blit_dst_info& dst, bool interpolate)
 {
 	if (swapchain_unavailable)
 		return false;
+
+	rsx::blit_src_info src = src_in; // VR fork: profile current_frame_copies may redirect the source
+	vr_before_blit(src, dst);
 
 	if (m_texture_cache.blit(src, dst, interpolate, m_rtts, *m_current_command_buffer))
 	{
 		m_samplers_dirty.store(true);
 		m_current_command_buffer->set_flag(vk::command_buffer::cb_has_blit_transfer);
+		vr_after_blit(src, dst, interpolate); // VR fork: pose stamp and the right eye's copy
 
 		if (m_current_command_buffer->flags & vk::command_buffer::cb_has_dma_transfer)
 		{
@@ -2813,6 +2857,8 @@ void VKGSRender::get_occlusion_query_result(rsx::reports::occlusion_query_info* 
 	if (data.indices.empty())
 		return;
 
+	if (vr_zcull_unready_visible(query)) return; // VR fork: profile zcull_no_wait
+
 	if (query->num_draws)
 	{
 		if (data.is_current(m_current_command_buffer))
@@ -2835,7 +2881,7 @@ void VKGSRender::get_occlusion_query_result(rsx::reports::occlusion_query_info* 
 		for (const auto occlusion_id : data.indices)
 		{
 			query->result += m_occlusion_query_manager->get_query_result(occlusion_id);
-			if (query->result && !g_cfg.video.precise_zpass_count)
+			if (query->result && !rsx::reports::precise_zpass_count()) // VR fork: profile zcull_approximate
 			{
 				// We only need one hit unless precise zcull is requested
 				break;

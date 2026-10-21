@@ -8,6 +8,7 @@
 #include "Emu/RSX/Program/GLSLCommon.h"
 #include "Emu/RSX/rsx_methods.h"
 #include "Emu/RSX/RSXThread.h"
+#include "Emu/RSX/Capture/rsx_camera_probe.h"
 
 #include "Emu/Memory/vm.h"
 
@@ -660,6 +661,17 @@ namespace rsx
 		{
 			memcpy(buffer, REGS(m_ctx)->transform_constants.data(), 468 * 4 * sizeof(float));
 		}
+
+		// VR fork: perturb the TRANSIENT copy only. The guest register bank above
+		// is never modified, so this is invisible to guest simulation and is fully
+		// reversible by unsetting the environment variable.
+		// No-op unless RPCS3_VR_PROBE or RPCS3_VR_PROBE_FILE configures a probe.
+		if (auto& probe = rsx::vr::camera_probe::get(); probe.enabled())
+		{
+			probe.apply(buffer, reloc_table.data(), reloc_table.size(),
+				REGS(m_ctx)->transform_constants.data(),
+				REGS(m_ctx)->surface_clip_width(), REGS(m_ctx)->surface_clip_height());
+		}
 	}
 
 	void draw_command_processor::fill_fragment_state_buffer(void* buffer, const RSXFragmentProgram& fragment_program) const
@@ -713,7 +725,7 @@ namespace rsx
 		const auto pixel_center = REGS(m_ctx)->pixel_center();
 		const f32 resolution_scale = (window_height <= RSX(m_ctx)->resolution_scaling_config.min_scalable_dimension)
 			? 1.f
-			: RSX(m_ctx)->resolution_scaling_config.scale_factor();
+			: RSX(m_ctx)->resolution_scaling_config.scale_factor_y(); // VR fork: the vertical scale (headset-shaped eyes scale x apart)
 
 		payload.wpos_scale = (window_origin == rsx::window_origin::top) ? (1.f / resolution_scale) : (-1.f / resolution_scale);
 		payload.wpos_bias[0] = 0.f;
@@ -727,6 +739,7 @@ namespace rsx
 			payload.wpos_bias[0] -= 0.5f;
 			payload.wpos_bias[1] -= 0.5f;
 		}
+		rsx::vr::encode_wpos_x(payload.wpos_bias[0], RSX(m_ctx)->resolution_scaling_config, window_height); // VR fork: headset-shaped eyes
 
 		utils::stream_vector_from_memory<2>(buffer, &payload);
 	}

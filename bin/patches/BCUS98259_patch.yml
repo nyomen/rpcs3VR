@@ -1,0 +1,163 @@
+Version: 1.2
+
+PPU-9a604c56796a32bf86ff037b682b0a744eb6a0dd:
+  "Disable MLAA":
+    Games:
+      "ICO":
+        BCUS98259: [ 01.00 ]
+    Author: "illusion (VR fork copy, on by default)"
+    Notes: "Disables the SPU MLAA pass. Required for VR: with MLAA the frame comes back from the SPUs at the native resolution (resolution scaling lost) and only for one eye. Same patch as the community patch.yml entry, carried here so it is present and on without downloading patches."
+    Patch Version: 1.1
+    Enabled By Default: true
+    Patch:
+      - [ be32, 0x00045a50, 0x38800000 ] # li r4 0x0
+      - [ be32, 0x00475f74, 0x40800003 ] # il r3 0x0
+      - [ be32, 0x0047621c, 0x40800017 ] # il r23 0x0
+  "Full Pixel Mode always on":
+    Games:
+      "ICO":
+        BCUS98259: [ 01.00 ]
+    Author: "VR fork"
+    Notes: "Forces the Full Pixel Mode option on, whatever the save or the options menu says. With it off the final image is zoomed about 16% against the game's projection (overscan), which makes the world swim in VR."
+    Patch Version: 1.0
+    Enabled By Default: true
+    Patch:
+      - [ be32, 0x0018eca4, 0x39200001 ] # li r9,1 (was lwz r9,0x10(r31)): the per-frame mode check (object 0xc34270) always sees Full Pixel Mode requested
+      - [ be32, 0x0018ec58, 0x38600001 ] # li r3,1 (was lwz r3,0x10(r9)): the mode getter returns on
+      - [ be32, 0x00020d38, 0x38000001 ] # li r0,1 (was lwz r0,0x38(r9)): the options menu shows ON (flag at 0x4d1dd8+0x38)
+  "Wider view (VR culling)":
+    Games:
+      "ICO":
+        BCUS98259: [ 01.00 ]
+    Author: "VR fork"
+    Notes: "Widens the game camera's field of view so objects outside the TV frame are still drawn (the game culls to its own frustum). For VR: the headset view is remapped from the game's projection, so the image keeps its scale. Scales tan(FOV/2) both ways; larger values draw more but cost frame rate and may lower LOD. Without VR the TV picture becomes a wide-angle view: set 1.0 to play flat."
+    Patch Version: 1.0
+    Enabled By Default: true
+    Configurable Values:
+      "Scale":
+        Type: double_enum
+        Value: 12800.0
+        Allowed Values:
+          "1.0 (off)": 640.0
+          "1.25": 800.0
+          "1.5": 960.0
+          "2.0": 1280.0
+          "2.5": 1600.0
+          "3.0": 1920.0
+          "5.0": 3200.0
+          "8.0": 5120.0
+          "12.0": 7680.0
+          "20.0": 12800.0
+          "40.0": 25600.0
+    Patch:
+      - [ bef32, 0x004ca6d0, "Scale" ] # 640.0 divisor of the PS2 screen distance scrz (camera setup 0xd364c, stored at 0xd37a8/0xd37e8); scrz drives the view-screen, view-clip (culling) and RSX projection matrices (0xd3174)
+
+PPU-07500788ed015ad425938fbde3b857487b38397b: # Shadow.self (Shadow of the Colossus) 1.00, disc
+  "Disable MLAA":
+    Games:
+      "Shadow of the Colossus":
+        BCUS98259: [ 01.00 ]
+    Author: "illusion (VR fork copy, on by default)"
+    Notes: "Disables the SPU MLAA pass: needed for resolution scaling and for VR (MLAA is only correct in one eye). Same patch as the community patch.yml entry."
+    Patch Version: 1.1
+    Enabled By Default: true
+    Patch:
+      - [ be32, 0x00200c58, 0x38000000 ] # li r0 0x0
+      - [ be32, 0x006f8374, 0x40800003 ] # il r3 0x0
+      - [ be32, 0x006f861c, 0x40800017 ] # il r23 0x0
+  "Full Pixel Mode always on":
+    Games:
+      "Shadow of the Colossus":
+        BCUS98259: [ 01.00 ]
+    Author: "VR fork"
+    Notes: "Forces the Full Pixel Mode option on, whatever the save or the options menu says (the option always reads as on). With it off the game renders 1216x684 with an overscan zoom: measured 19% against the game's projection, which makes the world swim on head turns in VR."
+    Patch Version: 1.0
+    Enabled By Default: true
+    Patch:
+      - [ be32, 0x00071568, 0x38600001 ] # li r3,1 (was bl 0x10f644, read saved option 0x11): boot sets the mode on (0x1e9ca0)
+      - [ be32, 0x00070488, 0x38600001 ] # li r3,1 (was bl 0x10f644): the settings copy (+0x48) starts on, so the options menu shows On
+      - [ be32, 0x000706bc, 0x38600001 ] # li r3,1 (was lwz r3,0x48(r29)): "apply settings" passes on (and saves it)
+      - [ be32, 0x00073324, 0x38600001 ] # li r3,1 (was mr r3,r29): the options toggle sets on
+  "Frame rate follows Vblank Rate":
+    Games:
+      "Shadow of the Colossus":
+        BCUS98259: [ 01.00 ]
+    Author: "VR fork (disc port of Margen67's 60 FPS patch)"
+    Notes: "Presents a frame on every vblank instead of every second one (the game's 30 FPS cap): 60 FPS at the 60 Hz vblank, as the community 60 FPS patch. The VR profile keeps the vblank at 60 Hz and tells the game that rate, so its clocks keep real time. If a frame runs late (too high a resolution scale) the game can drop objects for that frame (flashing holes)."
+    Patch Version: 1.3
+    Enabled By Default: true
+    Patch:
+      - [ be32, 0x0031eea4, 0x39200001 ] # li r9,1 (was li r9,2): frame interval at device+0x384 (init 0x31eb2c; its twin 0x31f1b8 has no callers)
+  "Disable Motion Blur":
+    Games:
+      "Shadow of the Colossus":
+        BCUS98259: [ 01.00 ]
+    Author: "illusion (VR fork copy, on by default)"
+    Notes: "Motion blur smears the view on head turns in VR and costs ~4 ms/frame at high resolution scales in stereo. Same patch as the community patch.yml entry."
+    Patch Version: 1.1
+    Enabled By Default: true
+    Patch:
+      - [ be32, 0x0021951c, 0x38000000 ] # li r0 0x0
+      - [ be32, 0x00219360, 0x38000000 ] # li r0 0x0
+  "Disable Bloom":
+    Games:
+      "Shadow of the Colossus":
+        BCUS98259: [ 01.00 ]
+    Author: "illusion (VR fork copy, on by default)"
+    Notes: "Bloom costs GPU time at high resolution scales in stereo. Same patch as the community patch.yml entry; turn it off for the original look."
+    Patch Version: 1.1
+    Enabled By Default: true
+    Patch:
+      - [ be32, 0x00209d88, 0x38000000 ] # li r0 0x0
+  "Wider view (VR culling)":
+    Games:
+      "Shadow of the Colossus":
+        BCUS98259: [ 01.00 ]
+    Author: "VR fork (from illusion's Extended FOV)"
+    Notes: "Widens the game camera's field of view so objects outside the TV frame are still drawn: the game only draws its own narrow view (44 degrees), so in VR everything beyond it was bright fog. At 3.0 the game view is about 150 x 130 degrees. The headset view is remapped from the game's projection, so the image keeps its scale. Without VR the TV picture becomes a wide-angle view: set 1.0 to play flat. 1.2: the camera's framing logic keeps the game's own field of view; with the widened one it kept pushing the camera into walls and snapping back. Only the main camera's view is widened (1.0 also widened a second 1-degree camera)."
+    Patch Version: 1.2
+    Enabled By Default: true
+    Configurable Values:
+      "Scale":
+        Type: double_enum
+        Value: 3.0
+        Allowed Values:
+          "1.0 (off)": 1.0
+          "1.25": 1.25
+          "1.5": 1.5
+          "1.75": 1.75
+          "2.0": 2.0
+          "2.25": 2.25
+          "2.5": 2.5
+          "2.75": 2.75
+          "3.0": 3.0
+          "4.0": 4.0
+    Patch:
+      - [ bef32, 0x00732894, "Scale" ] # FOV multiplier (1.0; the community Extended FOV sets 1.5), TOC-0x33cc
+      # The camera code 0xee438-0xee710 reads that constant as 1.0 for other things too; those reads
+      # now take the 1.0 at TOC-0x3398 (0x7328c8), so only the main camera's FOV multiplier is scaled.
+      - [ be32, 0x000ee570, 0xc3e2cc34 ] # lfs f31,-0x33cc(r2) (was lfs f28): f31 multiplies the main camera FOV (0xee59c)
+      - [ be32, 0x000ee574, 0xc382cc68 ] # lfs f28,-0x3398(r2) (was fmr f31,f28): the second camera's FOV and the clamp stay 1.0
+      - [ be32, 0x000ee490, 0xc022cc68 ] # lfs f1,-0x3398(r2): second camera's initial FOV 1.0
+      - [ be32, 0x000ee650, 0xc382cc68 ] # lfs f28,-0x3398(r2)
+      - [ be32, 0x000ee698, 0xc382cc68 ] # lfs f28,-0x3398(r2)
+      - [ be32, 0x000ee6a0, 0xc382cc68 ] # lfs f28,-0x3398(r2)
+      - [ be32, 0x000ee70c, 0xc382cc68 ] # lfs f28,-0x3398(r2)
+      # Camera framing (0xea628 reads the render view's field of view, then stores the view's half
+      # extent at the target's distance, +0x40/+0x44): tan(fov/2) there used the widened angle, so the
+      # camera kept moving into walls and back. It now takes fov / Scale: 0.5 * pi/180 becomes pi/360.
+      - [ be32, 0x000ea654, 0xc142cc34 ] # lfs f10,-0x33cc(r2) (was lfs f10,0.5): f10 = Scale
+      - [ be32, 0x000ea674, 0xefde5024 ] # fdivs f30,f30,f10 (was fmuls f30,f30,f10): fov / Scale
+      - [ be32, 0x000ea67c, 0xc0229120 ] # lfs f1,-0x6ee0(r2) (was lfs f1,pi/180): pi/360, the 0.5 moved here
+
+SPU-2801f277cbe95085325a1451cc64731b8f47c18b: # Shadow of the Colossus SPU mesh job (loaded by Shadow.self; same program as BCES01097 1.01)
+  "Disable Mesh Trimming":
+    Games:
+      "Shadow of the Colossus":
+        BCUS98259: [ 01.00 ]
+    Author: "Pappapatu (VR fork copy for the US disc, on by default)"
+    Notes: "The SPUs drop triangles the game judges too small or off its own camera's view (sized for the PS3's resolution). At higher resolution scales, and in VR where each eye looks from its own view, that shows as missing pieces of thin geometry (stairs, horse legs). This draws them all."
+    Patch Version: 1.1
+    Enabled By Default: true
+    Patch:
+      - [ be32, 0x00000490, 0x40800004 ]

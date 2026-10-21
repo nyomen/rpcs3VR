@@ -71,12 +71,13 @@ namespace rsx
 			}
 
 			template <typename T>
-			void add_dropdown(cfg::_enum<T>* setting, localized_string_id loc_id)
+			void add_dropdown(cfg::_enum<T>* setting, localized_string_id loc_id, std::function<bool(u32)> filter = {},
+				std::function<std::string(u32, const std::string&)> relabel = {})
 			{
 				ensure(setting && setting->get_is_dynamic());
 
 				const std::string localized_text = get_localized_string(loc_id);
-				std::unique_ptr<overlay_element> elem = std::make_unique<home_menu_dropdown<T>>(setting, localized_text);
+				std::unique_ptr<overlay_element> elem = std::make_unique<home_menu_dropdown<T>>(setting, localized_text, std::move(filter), std::move(relabel));
 				elem->set_size(this->w, menu_entry_height);
 
 				add_item(elem, [this, setting, elem = elem.get()](pad_button btn) -> page_navigation
@@ -138,7 +139,7 @@ namespace rsx
 
 						const auto previous = fmt::format("%s", setting->get());
 						const std::vector<std::string> list = setting->to_list();
-						const int selected_idx = dropdown->get_selected_index();
+						const int selected_idx = dropdown->get_selected_value_index();
 
 						if (const std::string& next_value = ::at32(list, selected_idx); setting->from_string(next_value))
 						{
@@ -322,6 +323,18 @@ namespace rsx
 		struct home_menu_settings_video : public home_menu_settings_page
 		{
 			home_menu_settings_video(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent);
+		};
+
+		// VR fork: the live VR settings (Video > VR in the game's custom configuration).
+		struct home_menu_settings_vr : public home_menu_settings_page
+		{
+			home_menu_settings_vr(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent);
+			page_navigation handle_button_press(pad_button button_press, bool is_auto_repeat, u64 auto_repeat_interval_ms) override;
+
+		private:
+			void build();
+			static bool dlss_options_shown();
+			bool m_dlss_options = false; // DLSS's own options are on the page
 		};
 
 		struct home_menu_settings_advanced : public home_menu_settings_page

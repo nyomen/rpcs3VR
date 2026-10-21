@@ -488,6 +488,11 @@ target_sources(rpcs3_emu PRIVATE
 target_sources(rpcs3_emu PRIVATE
     RSX/Capture/rsx_capture.cpp
     RSX/Capture/rsx_replay.cpp
+    RSX/Capture/rsx_camera_probe.cpp
+    RSX/Capture/rsx_stereo_inspector.cpp
+    RSX/Capture/rsx_vr_profile_generator.cpp
+    RSX/Capture/rsx_vr_hooks.cpp
+    RSX/Capture/rsx_vr_eye_shape.cpp
     RSX/Common/BufferUtils.cpp
     RSX/Common/surface_store.cpp
     RSX/Common/TextureUtils.cpp
@@ -657,6 +662,11 @@ if(TARGET 3rdparty_vulkan)
         RSX/VK/VKMemAlloc.cpp
         RSX/VK/VKOverlays.cpp
         RSX/VK/VKPipelineCompiler.cpp
+        RSX/VK/VKOpenXR.cpp
+        RSX/VK/VKGSRenderVR.cpp
+        RSX/VK/VKGSRenderVRDev.cpp
+        RSX/VK/VKOverlaysVR.cpp
+        RSX/VK/VKMultiviewVR.cpp
         RSX/VK/VKPresent.cpp
         RSX/VK/VKProgramPipeline.cpp
         RSX/VK/VKQueryPool.cpp
@@ -729,3 +739,9 @@ endif()
 if(WAYLAND_FOUND)
     target_link_libraries(rpcs3_emu PRIVATE OpenGL::EGL)
 endif()
+
+# VR fork: the vendored OpenXR headers use C-style casts in their version macros
+if(NOT MSVC)
+    set_source_files_properties(RSX/VK/VKOpenXR.cpp PROPERTIES COMPILE_OPTIONS "-Wno-old-style-cast")
+endif()
+include(RSX/VK/VKDLSS.cmake) # DLSS test (fork): its sources, -DDLSS_SDK, -DBUILD_DLSS_SELFTEST

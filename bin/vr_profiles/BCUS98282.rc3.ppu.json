@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "title_id": "BCUS98282",
+  "app_version": "01.00",
+  "name": "Ratchet & Clank Collection",
+  "max_fps": 0,
+  "default_fps": 0,
+  "game_frame_time_f32": ["0xc1de6c", "0xc1de7c"],
+  "game_frame_time_sq_f32": ["0xc1de70"],
+  "game_frame_time_cube_f32": ["0xc1de74"],
+  "native_rate_when": [ { "address": "0xd79cb4", "values": [1], "rate": 60 },
+                        { "address": "0xc1eba8", "values": [0], "rate": 60 } ],
+
+  "matrix_layout": "column_vectors",
+  "depth_remap_programs": ["1459aa3afca2e172"],
+  "depth_remap_uv": true,
+  "camera_blocks": [0],
+  "output_aspect_tolerance": 0.02,
+
+  "camera_position": {
+    "eye_baseline": 0.064
+  },
+
+  "stereo": {
+    "formula": "clip_x_shear",
+    "per_eye_separation": 0.0144009,
+    "convergence": 2.56,
+    "eye_offset": "baseline"
+  },
+
+  "screen_space": {
+    "screen_frame_draws": [ { "program": "f780fac85cd9eba2", "texture": "1280x720" } ],
+    "orthographic_block": 4,
+    "passthrough_hud": true,
+    "hud_programs": ["007f5efab1d12ef7"]
+  }
+}

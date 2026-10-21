@@ -1,0 +1,190 @@
+Version: 1.2
+
+PPU-8363904e0b8fc276380a8f0e158dd81d7a9cefc5:
+  "Wider view (VR culling)":
+    Games:
+      "Uncharted: Drake's Fortune":
+        BCUS98103: [ 01.10 ]
+    Author: "VR fork"
+    Notes: "The game culls against its own 75 x 47 degree view, so in the headset the deck, hull and ocean end at its frustum when you look down or around. This multiplies the tangent of the camera's half field of view by a scale word (x: 0x7cdd80, 1.0 here) where the camera's projection scale is built (0x4b4d3c), and sets the camera's aspect (+0x1d0, from which the vertical scale is derived) to the game's aspect x sy / sx (y: 0x7cdd84), so the frustum the game culls against widens by its own amount on each axis. The VR profile sets both words each frame to the smallest scales that hold both eyes' views at the current head pose (culling_scale_f32): the headset needs ~3.6x the game's height but ~2x its width. Without the profile they stay 1.0 and the game is unchanged. Version 3.0: separate axes (2.0 widened the width as much as the height). 3.1: the cave's two saved words moved out of the code segment (read-only on a fresh boot: 3.0 crashed after the intro). Version 2.0: the geometry jobs drop triangles that cover no pixel centre of the 1280x720 grid, and the wider projection shrinks every triangle, so models lost detail (version 1.0: about a quarter of the scene's vertices). Their viewport (built at 0x452420: scissor, viewport scales and offsets) is enlarged 16x about its origin, so the frustum and scissor tests are unchanged and the no-pixel test runs on a 16x finer grid: models keep more detail than the game shipped with at any Resolution Scale."
+    Patch Version: 3.1
+    Enabled By Default: true
+    Apply To Savestates: true
+    Patch:
+      - [ be32, 0x007cdd80, 0x3f800000 ] # x scale word, 1.0 (unused zeros at the end of the code segment)
+      - [ be32, 0x007cdd84, 0x3f800000 ] # y scale word, 1.0
+      # The game's own aspect (camera +0x1d0) is kept at 0x11eff00 and the value last written at 0x11eff04: zeros in the
+      # slack between the end of .bss (0x11e22e8) and the heap (0x11f0000), writable on a fresh boot (the code segment is not).
+      # 0x4b4d28: f1 = tanf(fov x k); f1 += [r27+0x30]; cot = f31 / f1, stored at camera +0x1d4 (the projection's x scale).
+      # The y scale is derived as x / [camera +0x1d0] (0.5625): the aspect becomes base x sy / sx, so y widens by sy.
+      - [ calloc, 0x004b4d3c, 16 ] # was lfs f0, 0x30(r27)
+      - [ be32, 0x0, 0x3d60007d ] # lis r11, 0x7d
+      - [ be32, 0x0, 0xc00bdd80 ] # lfs f0, -0x2280(r11)   x scale (0x7cdd80)
+      - [ be32, 0x0, 0xec210032 ] # fmuls f1, f1, f0       tan(fov/2) x sx
+      - [ be32, 0x0, 0xc04bdd84 ] # lfs f2, -0x227c(r11)   y scale (0x7cdd84)
+      - [ be32, 0x0, 0x3d60011f ] # lis r11, 0x11f
+      - [ be32, 0x0, 0xc07f01d0 ] # lfs f3, 0x1d0(r31)     the camera's aspect now
+      - [ be32, 0x0, 0xc08bff04 ] # lfs f4, -0xfc(r11)     the aspect last written (0x11eff04)
+      - [ be32, 0x0, 0xff832000 ] # fcmpu cr7, f3, f4
+      - [ be32, 0x0, 0x419e0008 ] # beq cr7, +8            unchanged: keep the base
+      - [ be32, 0x0, 0xd06bff00 ] # stfs f3, -0x100(r11)   the game set it: new base (0x11eff00)
+      - [ be32, 0x0, 0xc0abff00 ] # lfs f5, -0x100(r11)    base
+      - [ be32, 0x0, 0xeca500b2 ] # fmuls f5, f5, f2       base x sy
+      - [ be32, 0x0, 0xeca50024 ] # fdivs f5, f5, f0       / sx
+      - [ be32, 0x0, 0xd0bf01d0 ] # stfs f5, 0x1d0(r31)    camera aspect
+      - [ be32, 0x0, 0xd0abff04 ] # stfs f5, -0xfc(r11)    last written
+      - [ be32, 0x0, 0xc01b0030 ] # lfs f0, 0x30(r27)      the original instruction
+      # 0x452420 builds the geometry jobs' viewport block (r9): u16 scissor 0, width, 0, height at +8..+0xe, the
+      # view-projection at +0x10, viewport scales and offsets at +0x50..+0x5c.
+      - [ calloc, 0x00452554, 24 ] # was lwzu r0, 0x140(r11): the geometry viewport block (r9) enlarged 16x before its view-projection is copied
+      - [ be32, 0x0, 0x38600010 ] # li r3, 16
+      - [ be32, 0x0, 0xf8610070 ] # std r3, 0x70(r1)
+      - [ be32, 0x0, 0xc8010070 ] # lfd f0, 0x70(r1)
+      - [ be32, 0x0, 0xfc00069c ] # fcfid f0, f0
+      - [ be32, 0x0, 0xfc000018 ] # frsp f0, f0           K = 16.0
+      - [ be32, 0x0, 0xc1690050 ] # lfs f11, 0x50(r9)
+      - [ be32, 0x0, 0xed6b0032 ] # fmuls f11, f11, f0
+      - [ be32, 0x0, 0xd1690050 ] # stfs f11, 0x50(r9)
+      - [ be32, 0x0, 0xc1690054 ] # lfs f11, 0x54(r9)
+      - [ be32, 0x0, 0xed6b0032 ] # fmuls f11, f11, f0
+      - [ be32, 0x0, 0xd1690054 ] # stfs f11, 0x54(r9)
+      - [ be32, 0x0, 0xc1690058 ] # lfs f11, 0x58(r9)
+      - [ be32, 0x0, 0xed6b0032 ] # fmuls f11, f11, f0
+      - [ be32, 0x0, 0xd1690058 ] # stfs f11, 0x58(r9)
+      - [ be32, 0x0, 0xc169005c ] # lfs f11, 0x5c(r9)
+      - [ be32, 0x0, 0xed6b0032 ] # fmuls f11, f11, f0
+      - [ be32, 0x0, 0xd169005c ] # stfs f11, 0x5c(r9)
+      - [ be32, 0x0, 0xa069000a ] # lhz r3, 0xa(r9)   scissor width
+      - [ be32, 0x0, 0x54632036 ] # slwi r3, r3, 4
+      - [ be32, 0x0, 0xb069000a ] # sth r3, 0xa(r9)
+      - [ be32, 0x0, 0xa069000e ] # lhz r3, 0xe(r9)   scissor height
+      - [ be32, 0x0, 0x54632036 ] # slwi r3, r3, 4
+      - [ be32, 0x0, 0xb069000e ] # sth r3, 0xe(r9)
+      - [ be32, 0x0, 0x840b0140 ] # lwzu r0, 0x140(r11)
+
+  "VR: Head aim (direct camera)":
+    Games:
+      "Uncharted: Drake's Fortune":
+        BCUS98103: [ 01.10 ]
+    Author: "VR fork"
+    Notes: "With the VR profile's head aim: while its button (L1) is held, the aim camera, Drake and his aim turn with the head at once instead of through the right stick. The VR profile writes running totals of the head's turn in degrees (yaw, + left, at 0x11eff10; pitch, + down, at 0x11eff14). The aim camera keeps its aim direction from frame to frame (camera + 0x17a0, which the right stick turns); each frame, before it is used (0x4d8b48), it is turned by the change in the totals since the last time, like a stick turn without the stick's speed limit. Untick to aim with the stick only."
+    Patch Version: 3.0
+    Enabled By Default: true
+    Apply To Savestates: true
+    Patch:
+      - [ be32, 0x011eff10, 0x00000000 ]  # yaw total sent (degrees, + left), written by the VR profile; zeros between .bss and the heap
+      - [ be32, 0x011eff14, 0x00000000 ]  # pitch total sent (degrees, + down)
+      - [ be32, 0x011eff18, 0x00000000 ]  # yaw total already applied
+      - [ be32, 0x011eff1c, 0x00000000 ]  # pitch total already applied
+      - [ be32, 0x011eff20, 0x00000000 ]  # 1 while head aim drives (written by the VR profile, unused here)
+      - [ be32, 0x011eff24, 0x3f800000 ]  # 1.0
+      - [ be32, 0x011eff28, 0x3e2aaaab ]  # 1/6
+      - [ be32, 0x011eff2c, 0x3f000000 ]  # 0.5
+      - [ be32, 0x011eff30, 0x3d2aaaab ]  # 1/24
+      - [ be32, 0x011eff34, 0x3dcccccd ]  # 0.1: the smallest horizontal length a pitch turn may leave
+      - [ be32, 0x011eff38, 0x3c8efa35 ]  # pi/180
+      - [ calloc, 0x004d8b48, 57 ]         # aim camera, per frame before it uses its aim direction (r23 + 0x17a0, kept from frame to frame): turn it by the head's turn since the last time
+      - [ be32, 0x0, 0x3d80011f ]          # lis r12,0x11f
+      - [ be32, 0x0, 0xc02cff24 ]          # f1 = 1.0 (0x11eff24)
+      - [ be32, 0x0, 0xc04cff2c ]          # f2 = 0.5 (0x11eff2c)
+      - [ be32, 0x0, 0xc1acff38 ]          # f13 = pi/180 (0x11eff38)
+      - [ be32, 0x0, 0xc00cff10 ]          # yaw total sent (0x11eff10, degrees, + left)
+      - [ be32, 0x0, 0xc06cff18 ]          # yaw total applied (0x11eff18)
+      - [ be32, 0x0, 0xd00cff18 ]          # applied = sent
+      - [ be32, 0x0, 0xec001828 ]          # this frame's head yaw turn
+      - [ be32, 0x0, 0xec000372 ]          # radians
+      - [ be32, 0x0, 0xec600032 ]          # a2
+      - [ be32, 0x0, 0xc0acff28 ]          # 1/6
+      - [ be32, 0x0, 0xec83097c ]          # 1 - a2/6
+      - [ be32, 0x0, 0xec840032 ]          # sin
+      - [ be32, 0x0, 0xc0acff30 ]          # 1/24
+      - [ be32, 0x0, 0xeca30172 ]          # a2/24
+      - [ be32, 0x0, 0xeca51028 ]          # a2/24 - 1/2
+      - [ be32, 0x0, 0xeca508fa ]          # cos = 1 - a2/2 + a4/24
+      - [ be32, 0x0, 0xc0d717a0 ]          # x (the aim direction)
+      - [ be32, 0x0, 0xc0f717a4 ]          # y
+      - [ be32, 0x0, 0xc11717a8 ]          # z
+      - [ be32, 0x0, 0xed260172 ]          # x cos
+      - [ be32, 0x0, 0xed28493a ]          # x' = x cos + z sin
+      - [ be32, 0x0, 0xed480172 ]          # z cos
+      - [ be32, 0x0, 0xed06513c ]          # z' = z cos - x sin
+      - [ be32, 0x0, 0xecc90072 ]          # x = x'
+      - [ be32, 0x0, 0xc00cff14 ]          # pitch total sent (0x11eff14, degrees, + down)
+      - [ be32, 0x0, 0xc06cff1c ]          # pitch total applied (0x11eff1c)
+      - [ be32, 0x0, 0xd00cff1c ]          # applied = sent
+      - [ be32, 0x0, 0xec030028 ]          # this frame's head pitch turn, + up
+      - [ be32, 0x0, 0xec000372 ]          # radians
+      - [ be32, 0x0, 0xec600032 ]          # a2
+      - [ be32, 0x0, 0xc0acff28 ]          # 1/6
+      - [ be32, 0x0, 0xec83097c ]          # 1 - a2/6
+      - [ be32, 0x0, 0xec840032 ]          # sin
+      - [ be32, 0x0, 0xc0acff30 ]          # 1/24
+      - [ be32, 0x0, 0xeca30172 ]          # a2/24
+      - [ be32, 0x0, 0xeca51028 ]          # a2/24 - 1/2
+      - [ be32, 0x0, 0xeca508fa ]          # cos = 1 - a2/2 + a4/24
+      - [ be32, 0x0, 0xec6601b2 ]          # x2
+      - [ be32, 0x0, 0xec681a3a ]          # + z2
+      - [ be32, 0x0, 0xec60182c ]          # h = horizontal length
+      - [ be32, 0x0, 0xed270172 ]          # y cos
+      - [ be32, 0x0, 0xed23493a ]          # y' = y cos + h sin
+      - [ be32, 0x0, 0xed430172 ]          # h cos
+      - [ be32, 0x0, 0xed47513c ]          # h' = h cos - y sin
+      - [ be32, 0x0, 0xed6a1824 ]          # h'/h
+      - [ be32, 0x0, 0xed8602f2 ]          # x' = x h'/h
+      - [ be32, 0x0, 0xed6802f2 ]          # z' = z h'/h
+      - [ be32, 0x0, 0xc1acff34 ]          # 0.1 (0x11eff34)
+      - [ be32, 0x0, 0xedaa6828 ]          # h' - 0.1: nearly straight up or down -> keep the yaw-only vector
+      - [ be32, 0x0, 0xfccd332e ]          # x
+      - [ be32, 0x0, 0xfced3a6e ]          # y
+      - [ be32, 0x0, 0xfd0d42ee ]          # z
+      - [ be32, 0x0, 0xd0d717a0 ]          # stfs x
+      - [ be32, 0x0, 0xd0f717a4 ]          # stfs y
+      - [ be32, 0x0, 0xd11717a8 ]          # stfs z
+      - [ be32, 0x0, 0x7ee3bb78 ]          # mr r3,r23 (original)
+
+  "VR: Shadows fit the game's own view":
+    Games:
+      "Uncharted: Drake's Fortune":
+        BCUS98103: [ 01.10 ]
+    Author: "VR fork"
+    Notes: "With the Wider view patch: the sun's shadow cascades are fitted to the camera's frustum (the slice-corner builder at 0x14fc60 reads the camera's x scale +0x1d4 and aspect +0x1d0). With the head-driven widening that frustum changed with every head movement, so the cascades were refitted every frame and the shadows smeared and jumped while the head turned (and swam when the stick turned the oversized frustum). Here the fit uses the game's own projection widened by its own pair of words (x at 0x7cdd88, y at 0x7cdd8c; 1.0 = the game's view), which the VR profile moves in coarse, held steps, so the cascades stay put while the head moves."
+    Patch Version: 1.1
+    Enabled By Default: true
+    Apply To Savestates: true
+    Patch:
+      - [ be32, 0x007cdd80, 0x3f800000 ] # culling x / y widening 1.0 as the Wider view patch sets them (without it they were 0: a division by zero hung the game)
+      - [ be32, 0x007cdd84, 0x3f800000 ]
+      - [ be32, 0x007cdd88, 0x3f800000 ] # shadow-fit x widening, 1.0 (unused zeros after the culling words)
+      - [ be32, 0x007cdd8c, 0x3f800000 ] # shadow-fit y widening, 1.0
+      - [ calloc, 0x0014fc8c, 6 ]   # near corners: x scale for the shadow fit = the game's x scale x culling x / shadow x
+      - [ be32, 0x0, 0xc18401d4 ]   # lfs f12, 0x1d4(r4) (original: x scale with the culling widening)
+      - [ be32, 0x0, 0x3d40007d ]   # lis r10, 0x7d (set just after)
+      - [ be32, 0x0, 0xc00add80 ]   # lfs f0  culling x (0x7cdd80)
+      - [ be32, 0x0, 0xed8c0032 ]   # the game's own x scale
+      - [ be32, 0x0, 0xc00add88 ]   # lfs f0  shadow x (0x7cdd88)
+      - [ be32, 0x0, 0xed8c0024 ]   # / shadow x
+      - [ calloc, 0x0014fca0, 7 ]   # near corners: aspect for the shadow fit = the game's aspect x shadow y / shadow x
+      - [ be32, 0x0, 0x3d00011f ]   # lis r8, 0x11f (set just after)
+      - [ be32, 0x0, 0xc1a8ff00 ]   # lfs f13  the game's aspect (0x11eff00)
+      - [ be32, 0x0, 0x3d00007d ]   # lis r8, 0x7d
+      - [ be32, 0x0, 0xc168dd8c ]   # lfs f11  shadow y (0x7cdd8c)
+      - [ be32, 0x0, 0xedad02f2 ]   # x shadow y
+      - [ be32, 0x0, 0xc168dd88 ]   # lfs f11  shadow x
+      - [ be32, 0x0, 0xedad5824 ]   # / shadow x
+      - [ calloc, 0x0014fdb8, 8 ]   # far corners: aspect for the shadow fit
+      - [ be32, 0x0, 0x3d20011f ]   # lis r9, 0x11f
+      - [ be32, 0x0, 0xc009ff00 ]   # lfs f0  the game's aspect
+      - [ be32, 0x0, 0x3d20007d ]   # lis r9, 0x7d
+      - [ be32, 0x0, 0xc169dd8c ]   # lfs f11  shadow y
+      - [ be32, 0x0, 0xec0002f2 ]   # x shadow y
+      - [ be32, 0x0, 0xc169dd88 ]   # lfs f11  shadow x
+      - [ be32, 0x0, 0xec005824 ]   # / shadow x
+      - [ be32, 0x0, 0x392401b0 ]   # addi r9, r4, 0x1b0 (r9's value here: the camera's +0x1b0 row, set at 0x14fcf0, read at 0x14fdd8)
+      - [ calloc, 0x0014fdc0, 7 ]   # far corners: x scale for the shadow fit
+      - [ be32, 0x0, 0xc1a401d4 ]   # lfs f13, 0x1d4(r4) (original)
+      - [ be32, 0x0, 0x3d20007d ]   # lis r9, 0x7d
+      - [ be32, 0x0, 0xc189dd80 ]   # lfs f12  culling x
+      - [ be32, 0x0, 0xedad0332 ]   # the game's own x scale
+      - [ be32, 0x0, 0xc189dd88 ]   # lfs f12  shadow x
+      - [ be32, 0x0, 0xedad6024 ]   # / shadow x
+      - [ be32, 0x0, 0x392401b0 ]   # addi r9, r4, 0x1b0 (r9's value here: the camera's +0x1b0 row, set at 0x14fcf0, read at 0x14fdd8)

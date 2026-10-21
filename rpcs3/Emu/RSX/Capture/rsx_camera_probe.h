@@ -1,0 +1,1477 @@
+#pragma once
+
+// RSX camera probe (VR fork, Gate 4)
+//
+// Causal test rig for the camera seam that the Gate 3 inspector found by
+// correlation. It perturbs ONLY the transient per-draw copy of the vertex
+// transform constants; rsx::method_registers.transform_constants is never
+// touched, so guest simulation, FIFO progression and savestates are unaffected
+// and every effect is reversible by simply not setting the environment variable.
+//
+// Enable:  RPCS3_VR_PROBE="<key>=<value>,..."        one fixed probe, read once
+//          RPCS3_VR_PROBE_FILE="<path>"              re-read at every frame end,
+//                                                    so a whole probe series can
+//                                                    run against ONE booted scene
+//                                                    (removes scene variation as
+//                                                    a confound). Empty/missing
+//                                                    file => no perturbation.
+//
+//   base=<n>        base slot of the 4x4 world->clip matrix (c[base..base+3]);
+//                   c[base+4..] is tried next. Default: the profile's camera blocks
+//   cam=<n>         slot holding camera world position (w==1), used as the
+//                   pivot for rotations. Default: the profile's camera position
+//
+//   yaw=<deg>       rotate the world about the camera pivot (world Y)
+//   pitch=<deg>     ... world X
+//   roll=<deg>      ... world Z
+//   tx,ty,tz=<f>    move the camera by this world-space offset
+//
+//   eye=<f>         move the camera along its OWN right axis, derived from the
+//                   matrix itself. This is the probe that replicates what the
+//                   game does natively between its two eyes.
+//
+//   slot=<n>,comp=<0..3>,add=<f>
+//                   raw single-component add. Used for positive controls (a
+//                   slot we believe is camera state) and negative controls (a
+//                   slot we believe is not).
+//
+//   stereo=<sep>    apply a clip-space stereo shear to the camera
+//   conv=<c>        block:  clip.x += sep * (clip.w - conv).
+//                   This is the exact per-eye transform the game applies in its
+//                   native 3D mode (fitted over 641 draws, residual < 4e-6). It is
+//                   a post-multiply in clip space, so it is independent of any
+//                   world/object matrix folded into the block.
+//
+//   Draw classifier (always on for matrix probes). A draw is perturbed only if
+//     1. its render target has the output aspect ratio (a camera view), and
+//     2. it carries a PERSPECTIVE camera block (column 3 != (0,0,0,1)),
+//        auto-selected per program: c[256..259] if that is perspective
+//        (single-matrix route), else c[260..263] (two-matrix route, where
+//        c[256..259] is an affine world matrix).
+//   Scored against the native-3D oracle's own per-eye labels this is exact:
+//   641 true positives, 0 false positives, 0 false negatives. Rule 2 alone
+//   excludes the HUD (orthographic) but NOT the 512x256 cascade passes, which
+//   carry a perspective c[260] block the game keeps shared between eyes; rule 1
+//   is what excludes them (58 draws).
+//
+//   reqcam=0|1      additionally require the program to read the camera slot
+//                   (default 0; superseded by the perspective test, which is
+//                   strictly more precise - kept for experiments).
+//
+//   layout=columns  treat camera blocks as DP4 rows, clip[i] = dot(c[base+i], v)
+//                   (the profile's matrix_layout "column_vectors"), for an
+//                   unprofiled game
+//
+//   title=<id>      only act on this title id (default: any title with a profile)
+//
+//   render=1         enable the Gate 5 renderer interface. The renderer calls
+//                    apply_render_eye() twice on two *new* host constant
+//                    allocations; it never reuses this probe's in-place
+//                    experiment path. eye_sign is -1 for the native left eye
+//                    and +1 for the native right eye. This applies both
+//                    camera policies measured in Gate 4: the per-eye clip-X
+//                    shear and the c[465] camera-position offset.
+//
+// Convention: RSX vertex programs emit clip position as
+//     o = v.x*c[base] + v.y*c[base+1] + v.z*c[base+2] + c[base+3]
+// i.e. a row-vector convention where c[base..base+3] are the ROWS of the
+// world->clip matrix M, and o = v * M. A camera delta D is therefore applied as
+// M' = D * M. Column 0 of M's upper 3x3 is the world-space direction that maps
+// to clip X, which is the camera right axis.
+
+#include <cmath>
+#include <memory>
+#include <mutex>
+#include <span>
+#include <string>
+#include <string_view>
+#include <array>
+#include <vector>
+
+#include "util/types.hpp"
+#include "util/atomic.hpp"
+#include "rsx_vr_hooks.h" // effective_vblank_rate(), multiview_active()
+
+struct Pad; // Emu/Io/pad_types.h (head_aim_pad)
+
+namespace rsx::vr
+{
+	// A profile fragment_constant_overrides entry (see title_profile).
+	struct fragment_constant_override
+	{
+		u64 program = 0;  // vertex program ucode hash
+		u64 fragment = 0; // "fragment": fragment program ucode hash too (0: any; a full-screen vertex program serves many passes)
+		u32 constant = 0; // index into the fragment program's constants (_fetch_constant(n))
+		std::array<f32, 4> value{};
+		bool replace = true; // "value": replace the constant; else scale the game's own value
+		std::array<f32, 4> scale{1.f, 1.f, 1.f, 1.f};
+		// "game_fov_deg": [h, v]: in the headset view x and y are also scaled by the game's tangent range over the eye's
+		// rendered one, so screen-space offsets (filter taps) keep the flat game's size relative to the picture.
+		f32 game_fov_h = 0.f, game_fov_v = 0.f;
+		// "inverse_fit_words": { "x": "0x...", "y": "0x...", "fov_deg": v, "aspect": a }: the constant is also divided by the
+		// growth of a camera-frustum fit's radius under the culling words at x / y (read each draw; 1 = the game's view):
+		// sqrt((wx tx)^2 + (wy ty)^2) / sqrt(tx^2 + ty^2), tx = tan(fov / 2) aspect, ty = tan(fov / 2). For shadow-map filter
+		// taps spaced in texels (Uncharted: 4 jittered taps) over cascades a Wider view enlarged: in texels they stayed the
+		// same, so on the ground they spread 2-3x and the per-pixel jitter showed as stripes in the sun patches.
+		u32 fit_word_x = 0, fit_word_y = 0;
+		f32 fit_fov_deg = 0.f, fit_aspect = 1.f;
+	};
+
+	// A title's VR profile, bin/vr_profiles/<TITLE_ID>.json (schema 1). Every
+	// game-specific value the stereo renderer uses comes from here.
+	struct title_profile
+	{
+		std::string title_id;
+		std::string app_version; // expected game version; a mismatch is logged
+		std::string name;        // the game's name, for the settings (optional)
+
+		// 4-slot camera matrices, tried in order; the first perspective one is
+		// the draw's camera.
+		std::vector<u32> camera_blocks;
+		// Per camera block: its 4 slots when the profile lists them explicitly
+		// ([0, 1, 2, 7]: MGS4 draws camera-relative with the translation row in c[7]),
+		// otherwise all umax (contiguous from the base).
+		std::vector<std::array<u32, 4>> camera_block_slots;
+		// false (row_vectors): clip = v.x*c[b] + ... + c[b+3], one slot per matrix row.
+		// true (column_vectors): clip[i] = dot(c[b+i], v), the transpose (PSGL/Cg DP4).
+		bool column_vectors = false;
+		// column_vectors_xyw: a DP4 camera of three slots, clip x, y and w at base,
+		// base+1, base+2; the shader derives z from w (NFS Most Wanted: c[212..214],
+		// z parameters in c[215]). Implies column_vectors.
+		bool xyw_rows = false;
+		// Blocks (camera or HUD) stored in the row_vectors layout whatever matrix_layout says:
+		// Bayonetta's scene is column_vectors c[8..11], its sprites row_vectors c[24..27].
+		// Blocks stored in the other layout than matrix_layout: row_vector_blocks in a column_vectors game, or
+		// column_vector_blocks in a row_vectors game (Dragon Age: Origins' foliage, a DP4 camera at c[258]); one list.
+		std::vector<u32> row_vector_blocks;
+		// Camera blocks some programs read in the other layout: tried in their own layout first, then transposed. Dragon
+		// Age: Origins' cloud layer reads the view-projection at c[256] as DP4 columns (no z), every other program as rows.
+		std::vector<u32> either_layout_blocks;
+		// Blocks holding another view of the same camera: Bayonetta's motion-vector pass keeps the
+		// previous frame's view-projection in c[36..39] beside the camera c[8..11]. They get the camera
+		// block's clip-space eye transform (X = M^-1 * M_eye), so velocities stay the game's instead of
+		// the head rotation, eye offset and FOV change (characters blurred in the headset).
+		std::vector<u32> linked_camera_blocks;
+		// A palette of per-bone clip matrices beside the camera block, picked per vertex by an index register
+		// (Kingdom Hearts: c[256 + 4k], k from the vertex): 4-slot blocks from first to last (inclusive) get the
+		// camera block's clip-space eye transform, like linked_camera_blocks, but only blocks with the camera's
+		// projection (clip z = a * clip w + b): other data in the range (a UV table) is left alone.
+		u32 camera_palette_first = 0;
+		u32 camera_palette_last = 0;
+		// A camera block must be rigid: its clip x, y and w directions mutually
+		// orthogonal. Rejects unrelated data that happens to sit in a listed block.
+		bool require_rigid_camera = false;
+		// Camera blocks accepted without the rigid test: a program whose block folds in an
+		// object's non-uniform scale (Demon's Souls' fog gate distortion layer, c[4..7]:
+		// clip y and w nearly parallel). The eye transform handles non-rigid blocks.
+		std::vector<u32> nonrigid_camera_blocks;
+		// A camera block must also project square pixels at the output aspect
+		// (|clip y| / |clip x| within 10% of it). For engines whose camera sits at a
+		// varying base after a varying number of object-matrix slots (inFamous 1/2),
+		// where the profile lists overlapping bases and a HUD block can pass the
+		// perspective and rigid tests.
+		bool require_camera_aspect = false;
+		// "reject_camera_aspect": 1.0: the opposite test, blocks within 3% of this aspect are not the camera. For a game
+		// whose Wider view widens its camera's axes separately (God of War III: 16:9 -> ~1.07 with both tangent floors
+		// up, so require_camera_aspect rejected the whole scene: no head tracking, the flat game held at an old pose,
+		// a box in the headset) while its full-screen passes carry a square matrix in the camera slot. 0: off.
+		f32 reject_camera_aspect = 0.f;
+		// Programs that index their constants (bone palettes) get the whole bank, so any slot of a camera
+		// block is found there: bones at c[3] in Dragon's Dogma's skinned programs looked like its static
+		// camera c[3]. true: in those programs a camera block counts only if the program reads its slots
+		// directly (the program's constant_ids), as the profile generator samples them.
+		bool camera_slots_read_directly = false;
+		// Reuse each eye's camera block result while the game's block and everything else the eye transform reads
+		// are unchanged from that eye's previous plain scene-camera draw (SEGA Rally: ~95% of its 2-4k draws a frame).
+		// Dev: RPCS3_VR_BLOCK_CACHE=0/1 forces it off/on.
+		bool camera_block_cache = false;
+		// "scaled_camera_blocks": true: a non-rigid camera block scaled per object axis gets the projection solved from it
+		// (this frame's) instead of last frame's dominant one. For games whose projection changes as the head moves
+		// (Uncharted's culling widening: scaled scenery juddered).
+		bool scaled_camera_blocks = false;
+		// "spu_async_compile": true: an SPU that reaches code nobody compiled yet runs it interpreted while it compiles on a
+		// worker thread (Emu/Cell/SPUAsyncCompile.cpp), instead of stopping for the compile. Gran Turismo 5 froze on a fresh
+		// install (empty SPU cache) without it: a job queue's start was lost in that pause. Dev: RPCS3_SPU_ASYNC=0/1.
+		bool spu_async_compile = false;
+		// "game_rate_measured": false: the frame-rate words (game_fps_u32, game_frame_time_f32, ...) always get the VR rate,
+		// never the measured rate of a game running below it. For a game that times slow frames itself: God of War sets
+		// up its menus and messages from its rate word, and a dip in that word (a hitch while loading) left the Power Up
+		// screen, the pause menu and tutorial messages black or stuck for the rest of the session.
+		bool game_rate_measured = true;
+		// "vblank_steps": true: the game steps its world once per vblank, by its frame-time word (game_frame_time_f32), and
+		// advances race ticks of 1/60 s per step (Gran Turismo 5). Below 60 FPS the vblank stays at 60 Hz and the frame
+		// limiter holds the VR frame rate, as on a PS3 that drops frames; the frame-time words get the vblank's length (never
+		// the measured rate: a slow frame catches up by vblanks). At a 45 Hz vblank GT5 ran at 0.75x, at 90 Hz with 1/45 at 2x.
+		bool vblank_steps = false;
+		// "display_area_sizes": true: the texture sizes in screen_frame_draws and reduced_scale_frames also match the same size
+		// scaled down uniformly to 0.8. Gran Turismo 5 renders its full-screen 2D targets at its Adjust Display Area setting:
+		// 2560x1440 at 1.0, 2304x1296 at a fresh install's 0.9, where its menus stayed in the headset view.
+		bool display_area_sizes = false;
+		// "clear_view_targets": true: a view-sized colour target is cleared the first time it is bound in a frame. For games
+		// that never clear colour because their sky covers the game's view: turned, the parts outside it kept older
+		// frames and smeared (MotorStorm: Pacific Rift).
+		bool clear_view_targets = false;
+		// The game's clip space has NDC +Y pointing down the screen (its viewport's y scale is positive: Kingdom
+		// Hearts 1.5). The head pose is turned into that basis with y flipped, else head pitch and roll turn the
+		// world the wrong way (yaw is unaffected). Same as RPCS3_OPENXR_FLIP_Y, for this game only.
+		bool view_y_down = false;
+		// Textures read at `from` (a main-memory copy the SPUs process, which has only the left eye) are read
+		// from the render target at `to` instead, per eye (Puppeteer: scene 0xc0750000 -> SPU post -> 0x399c0000). Blits out
+		// of `from` too. `to` 0 ("camera" in the profile): the newest target of this frame's camera draws with the copy's
+		// pitch (Dragon Age II alternates two scene targets).
+		std::vector<std::pair<u32, u32>> texture_redirects;
+		// Vertex program ucode hashes whose draws keep the game camera in both eyes (no head transform or
+		// stereo). For invisible helper passes that break when moved (The Darkness: scaled unit boxes drawn
+		// without colour). Probe gamecam= tries candidates live.
+		std::vector<u64> game_camera_programs;
+		// Vertex program ucode hashes of deferred passes whose fragment program rebuilds positions from a depth buffer
+		// through the game's camera, with fragment constants the head transform never reaches. In the headset the depth
+		// and screen position are the eye's, so the fragment shader maps them to the game's (the eye's camera block
+		// transform undone) before the program reads them (RSX_SHADER_CONTROL_VR_DEPTH_REMAP). The program's lowest
+		// texture coordinate must carry its clip position, and the depth be its lowest depth texture read as colour.
+		// Asura's Wrath: the characters' shadows are a screen-space mask (07d7202eb4af1d79) projecting the scene depth
+		// into each character's shadow map; in the headset the shadows slid across the characters as the head turned.
+		std::vector<u64> depth_remap_programs;
+		// An entry given as { "program": "<hash>", "texture0": "WxH", "texture0_format": "0xa5" }: the remap applies only to
+		// that program's draws whose texture unit 0 has that size (and raw format byte, if given) and whose render target is
+		// that size too. For a full-screen program the game also uses for other passes (Uncharted's fc15ec0752d20290: the
+		// sun-shadow mask, and the depth resolve, depth downsamples, bloom and post chain).
+		struct depth_remap_texture0_rule { u64 program; u32 size; u32 format; }; // size: width << 16 | height; format 0: any
+		std::vector<depth_remap_texture0_rule> depth_remap_texture0;
+		// depth_remap_packed_unit: the remap passes read their depth from this texture unit as a colour copy of the depth
+		// (24 bits as RPCS3's Z24-as-RGBA8 conversion gives them: (g, b, stencil, r) / 255), not from a depth texture.
+		// Uncharted's resolve pass (the same program) copies a sample of the 2x MSAA depth into such a colour target, which the
+		// sun-shadow pass reads. -1 = none.
+		s32 depth_remap_packed_unit = -1;
+		// dlss_jitter: DLSS's sub-pixel jitter amplitude (1 = full, 0 = none). MotorStorm's ground went black in patches with
+		// it (a pass that compares the jittered depth with something unjittered; exact pass not found), clean without.
+		f32 dlss_jitter = 1.f;
+		// dlss_pair_nearest: a draw whose address key did not repeat is paired with the previous frame's draw of the same
+		// program whose matrix is nearest to where this frame's camera motion puts it (instead of by draw order). Gran Turismo 5
+		// rebuilds its cars' vertex data every frame, its cars share meshes, and their triangle counts change with the view: by
+		// draw order half the car draws took another car's motion or none, and the cars smeared in frame generation on head turns.
+		bool dlss_pair_nearest = false;
+		// depth_remap_volume_programs: other programs drawing the remap passes' volumes (Sonic's stencil pre-pass
+		// 2fe8ebfb47d877be): they take the scene camera's eye transform as the remap passes do.
+		std::vector<u64> depth_remap_volume_programs;
+		// inverse_camera_programs: screen-space passes that build each pixel's world ray from the camera's INVERSE
+		// view-projection in a constant block (Prince of Persia's sandstorm haze 149a9a825056ebba, c[200]: NDC corners
+		// through it, divided by w). In the headset the block becomes H * G * E^-1 per eye (G, E: the eye's latest scene
+		// camera block as the game wrote it and as drawn for the eye), so each eye pixel gets its own ray and the effect
+		// turns with the head instead of following the game's screen.
+		struct inverse_camera_program
+		{
+			u64 program = 0; // vertex program ucode hash
+			u32 block = 0;   // first of its four constants
+		};
+		std::vector<inverse_camera_program> inverse_camera_programs;
+		// depth_remap_ray_texcoord: the texture coordinate holding the pass's view-space ray (built with the game's view);
+		// the remap replaces it with the game camera's ray to the point the eye sees (Sonic's shadow cascades). -1 = none.
+		s32 depth_remap_ray_texcoord = -1;
+		// depth_remap_xyw: the clip position texture coordinate is packed (x, y, w) instead of (x, y, z, w).
+		bool depth_remap_xyw = false;
+		// depth_remap_uv: the texture coordinate holds the pass's screen uv (u = (x/w + 1)/2, v = (1 - y/w)/2, as a depth
+		// lookup coordinate) instead of its clip position; a pass that also reads its window position (wpos) gets it
+		// moved by the same remap. Ratchet & Clank's character-shadow projector.
+		bool depth_remap_uv = false;
+		// depth_remap_screen: screen-space passes without a camera block that light the scene from the depth buffer in
+		// screen tiles (Sonic's tiled cave lights 8761ccb6b94bd151: one quad per tile, the tile's lights as constants). In
+		// the headset each eye pixel's depth is taken to the game camera (the scene camera's eye transform undone), the ray
+		// texture coordinate becomes the game camera's ray to that point and the uv one the eye pixel's, each tile's quad
+		// is drawn through the head rotation (widened by tile_margin of its size, border tiles reaching past the game's
+		// screen edge) and keeps only the pixels whose point lies in its tile in the game's view.
+		std::vector<u64> depth_remap_screen_programs;
+		// depth_programs: the first level of the depth pyramid the game reads back to give each tile its lights (Sonic's
+		// 3f4215b47aae1a90). In the headset its depth reads at a game uv take the eye's depth in that direction (the head
+		// rotation undone) as the game camera's depth, so the tiles' depth ranges are the game view's.
+		std::vector<u64> depth_remap_screen_depth_programs;
+		s32 depth_remap_screen_ray_texcoord = -1;
+		s32 depth_remap_screen_uv_texcoord = -1;
+		f32 depth_remap_screen_tile_margin = 0.25f;
+		f32 output_aspect_tolerance = 0.f; // camera views share the output aspect
+		// Aspect of the render targets that hold camera views, when it is not the
+		// output's: MGS4 renders its scene anamorphically into 1024x768 and stretches
+		// it to 16:9. 0 = the output aspect.
+		f32 camera_target_aspect = 0.f;
+		// A render target of this size holds a camera view.
+		bool is_view_target(u32 width, u32 height, f32 output_aspect) const
+		{
+			const f32 aspect = camera_target_aspect > 0.f ? camera_target_aspect : output_aspect;
+			return width && height && std::fabs((static_cast<f32>(width) / height) / aspect - 1.f) <= output_aspect_tolerance;
+		}
+		// Render targets exactly this wide (guest pixels) keep the game's camera in
+		// both eyes: views that are not the player's, e.g. Blur's rear-view mirror.
+		std::vector<u32> game_camera_target_widths;
+		// Camera blocks whose projection aspect (|clip y| / |clip x|) is one of these, within 0.25%, keep the game's
+		// camera: views rendered for a texture at their own aspect. Asura's Wrath renders its TV-screen feeds at
+		// 720/408 (1.765) into the scene target before copying them out; the player's camera is 16:9 (1.778).
+		std::vector<f32> game_camera_aspects;
+
+		u32 camera_position_slot = umax; // umax: the game has none
+		f32 eye_baseline = 0.f;          // native eye distance, world units
+
+		// clip.x += sep * (clip.w - conv), sep = -/+ per_eye_separation.
+		struct stereo_rule
+		{
+			u32 output_width_divisor = 1; // applies to targets output_width / divisor wide
+			f32 per_eye_separation = 0.f;
+			f32 convergence = 0.f;
+		};
+		stereo_rule stereo; // default
+		std::vector<stereo_rule> stereo_by_target_width;
+
+		// Headset eyes offset by eye_baseline in world units, taken from each camera
+		// matrix's own scale, instead of the stereo rule's fixed clip-space shift. The
+		// shift stands for eye_baseline only at the projection it was measured with: a
+		// patch that widens the game's view (Shadow of the Colossus's Wider view) makes
+		// the same shift a much wider eye distance, so the world looked tiny.
+		// stereo.eye_offset: "baseline".
+		bool stereo_eye_offset_from_baseline = false;
+		// eye_offset "baseline_per_w": the baseline offset per unit of the block's clip-w row, so a scale folded into the
+		// block (an object's model matrix) cancels out and eye_baseline is in view units. For games whose camera blocks
+		// are per-object MVPs with different scales (Jak 1).
+		bool stereo_eye_offset_per_w = false;
+
+		u32 screen_space_block = umax; // orthographic block => HUD/menu box
+		// Programs whose HUD matrix is in another block (by vertex program ucode hash): their draws use that block as
+		// the orthographic HUD block. Dante's Inferno's tooltip text reads a unit-square matrix in c[256], a slot its
+		// 3D draws use for their world matrix (identity, so a block-wide rule would box the scene).
+		struct hud_block_program
+		{
+			u64 program = 0;
+			u32 block = 0;
+		};
+		std::vector<hud_block_program> screen_space_hud_block_programs;
+		// The HUD block is read in rows whatever matrix_layout says (orthographic_block_layout "row_vectors"),
+		// for a HUD that stores its pixel matrix in the other layout from the scene's camera.
+		bool screen_space_block_rows = false;
+		bool screen_space_bare_projection = false;
+		// screen_space.bare_projection as a list of camera blocks: only a bare projection bound from one of these is
+		// screen space; in other blocks it is the camera (WipEout HD: the menu cloud's c[260] goes in the box, the
+		// in-race glows drawn in camera space through c[256] follow the head). Empty with bare_projection true: all.
+		std::vector<u32> screen_space_bare_projection_blocks;
+		// A projection with no view rotation and only a translation along the view
+		// axis (W = z + d, d != 0): geometry the game draws in its camera's space at
+		// a fixed depth, e.g. Blur's 3D HUD. Screen space too.
+		bool screen_space_depth_offset_projection = false;
+		// A bare projection (as above) whose aspect is not the output's: God of War HD draws
+		// its HUD with the scene's slots and a 4:3 projection, and its scene with a 16:9 one
+		// (both bare: the view is applied to the vertices). The HUD goes into the box.
+		bool screen_space_offaspect_projection = false;
+		// A draw without depth test whose camera block has no translation at all (the
+		// view rotation and projection only, clip w = view z) is a full-screen pass
+		// that builds view rays from it, e.g. inFamous 2's final composite. Left as the
+		// game drew it: the eye shear would shift the rays and smear the image edge.
+		// (inFamous 2 also renders world geometry camera-relative with such a block,
+		// but always with depth test.)
+		bool screen_space_rotation_only_passthrough = false;
+		// HUD and menus drawn with no matrix at all (positions come out of the vertex
+		// shader in screen space; ICO's pause menu): a draw that uses no camera block,
+		// samples only ordinary textures and targets a buffer no camera draw wrote this
+		// frame goes into the HUD box through the vertex context's viewport matrix.
+		bool screen_space_passthrough_hud = false;
+		// Orthographic-block draws that sample a colour render target are full-screen
+		// passes (post-processing), not HUD: they stay as drawn. Demon's Souls draws its
+		// HUD and its post passes with the same c[0]. Off by default (WipEout's and Pure's
+		// passes never read their HUD block); the generator sets it when passes read it.
+		bool screen_space_hud_skips_passes = false;
+		// Only draws into a display buffer take the HUD box, and with hud_skips_passes only draws that
+		// sample the scene or a display buffer are passes. Gran Turismo 5 rasterises its glyphs into a
+		// 2048x1080 font atlas with the HUD's matrix (boxed, all text broke) and draws text from it.
+		bool screen_space_hud_display_buffers_only = false;
+		// A frame whose first write to a display buffer is a HUD-box draw: clear the shown region first (Killzone HD).
+		bool screen_space_clear_outside_box = false;
+		// The HUD box is applied to the vertex shader's output position instead of to the orthographic
+		// block, so varyings the shader derives from the projected position (Gran Turismo 5's text clip
+		// masks) stay with the geometry.
+		bool screen_space_hud_box_after_shader = false;
+		// Vertex programs (ucode hashes) whose positions come out already projected by
+		// the game's camera (ICO's flames and glows: GS-style sprites, NDC with w = 1).
+		// They get the latest camera draw's eye transform, B^-1 * B_eye, after the program.
+		std::vector<u64> screen_space_preprojected_programs;
+		// Of those, the ones whose scene draws also take it with depth test off (entry
+		// { "program": ..., "without_depth_test": true }): Dante's Inferno's torch glows.
+		std::vector<u64> screen_space_preprojected_untested;
+
+		// Vertex programs (ucode hashes) whose matrix-less draws are HUD even into a
+		// target that camera draws also wrote (Shadow of the Colossus draws its title,
+		// menu and font glyphs straight into the scene's final image). The HUD box's other
+		// checks (full-frame target, ordinary textures only) still apply.
+		std::vector<u64> screen_space_hud_programs;
+		// Vertex programs whose draws take the game's exact per-pixel depth when boxed (the fixed-in-front HUD box tilts
+		// with the head, so depth interpolated across the tilted box is no longer the game's): Gran Turismo 5's arcade
+		// menu cards are parallel quads ~2e-7 apart in depth, and cut through each other in slices.
+		std::vector<u64> screen_space_hud_exact_depth_programs;
+		// Draws never boxed, by vertex program ucode hash and the size of texture 0: full-screen overlays drawn with the
+		// HUD matrix and the HUD's own shaders (Killzone HD's film grain, 40 tiles of a 128x128 noise texture).
+		struct unboxed_draw
+		{
+			u64 program = 0;
+			u16 width = 0;
+			u16 height = 0;
+		};
+		std::vector<unboxed_draw> screen_space_unboxed_draws;
+		// A frame containing one of these draws (same match as unboxed_draws) is shown whole on the fixed screen, the
+		// game's own camera included: a menu composed of a 3D model and 2D layers (God of War's main menu: Kratos in front
+		// of a 2D fire background), which the headset view pulls apart. List a draw only the menu makes (its logo).
+		std::vector<unboxed_draw> screen_space_screen_frame_draws;
+		// Per screen_frame_draws entry, "without_camera": true: the entry counts only in a frame with no camera draws.
+		// For a generic draw that marks a movie but also turns up in gameplay (God of War III's full-screen copy program
+		// draws its movies, and gameplay after the pause menu: the whole game went on the fixed screen).
+		std::vector<bool> screen_space_screen_frame_draw_without_camera;
+		// frame_rate_draws (same match): the frame-rate words (game_refresh_rate_f32, game_frame_time_f32, ...) get the VR
+		// rate only while one of these draws was seen in the last 2 s, the game's own 60 Hz values otherwise. Sonic & All-Stars
+		// Racing Transformed: a step rate other than 60 anywhere in the menus left the next race unable to start (the
+		// countdown never comes); from the race load on it is fine, so the race HUD's draws mark the VR rate.
+		std::vector<unboxed_draw> frame_rate_draws;
+		std::vector<u32> frame_rate_draw_min_counts; // per frame_rate_draws entry: matches a frame needs (Sonic's loading screen draws one HUD icon, the race 10)
+		// reduced_scale_frames: while frames contain one of these draws, the Resolution Scale is lowered to
+		// reduced_scale_percent (Gran Turismo 5's pre-race grid screen renders its 3D view 2x2 supersampled).
+		std::vector<unboxed_draw> reduced_scale_draws;
+		u16 reduced_scale_percent = 0;
+		// Draws skipped entirely while VR is enabled, same match as unboxed_draws; each entry has a name and an
+		// on/off flag ("hidden") so a player can switch an effect back on (Killzone HD: film grain).
+		std::vector<unboxed_draw> hidden_draws;
+		// HUD draws resized about the game screen's centre before the HUD box (same match as unboxed_draws).
+		// Killzone HD's aiming reticule filled much of the headset view: 0.25.
+		struct scaled_draw
+		{
+			u64 program = 0;
+			u16 width = 0;
+			u16 height = 0;
+			f32 scale = 1.f;
+			// Optional "texture_unit": the unit whose texture size is matched (default 0). Optional "depth": metres; the draw is
+			// placed that far in the HUD box's direction instead of at the HUD depth (Uncharted's aim reticle at 10 m, in
+			// the scene, while the rest of the HUD stays at its depth).
+			u8 texture_unit = 0;
+			f32 depth = 0.f;
+		};
+		std::vector<scaled_draw> screen_space_scaled_draws;
+		// Draws whose orthographic block maps output pixels 1:1 are screen fills, not HUD: Gran Turismo 5
+		// lays its HUD out in 1920x1080 units and clears and fades the screen in 1280x720 pixels. Boxed,
+		// the fills left trails around the box and broke the menu text.
+		bool screen_space_output_pixel_draws_not_hud = false;
+		// Camera draws through a viewport smaller than their view target go into the HUD box with the
+		// game's camera (Gran Turismo 5's rear-view mirror). Needs hud_box_after_shader.
+		bool screen_space_subviewport_cameras_in_box = false;
+		// Clip-w rows (input x, y, z, w weights) of cameras whose draws are part of the 2D screen: they go into
+		// the HUD box with the game's camera. Ratchet & Clank's menu panels are 3D meshes drawn with a fixed
+		// axis-aligned menu camera (clip w = x - 256); its world programs also draw the levels, so a program
+		// match boxed the whole level.
+		std::vector<std::array<f32, 4>> screen_space_boxed_cameras;
+
+		// Vertex constants holding texture-coordinate offsets (a pass's filter taps), divided
+		// by the resolution scale so the filter keeps its footprint in rendered pixels. Ridge
+		// Racer 7's scene resolve averages three taps about a quarter of a native pixel apart;
+		// unscaled, at 600% that smeared every edge of the scene over about three pixels.
+		struct scaled_constants
+		{
+			u64 program = 0;                 // vertex program ucode hash
+			std::vector<u16> constant_slots; // ("slots" in the file; a Qt macro in C++)
+		};
+		std::vector<scaled_constants> resolution_scaled_constants;
+		// Fragment constants replaced in the draws of one vertex program: turns off a post
+		// effect by its strength constant. Demon's Souls' depth-of-field composite blends in its
+		// blurred copy by fc[0]; the CoC it scales includes a blur growing from the screen centre,
+		// which in the headset's wider view covered the floor and the top of the view.
+		std::vector<fragment_constant_override> fragment_constant_overrides;
+		// "fragment_camera_rows": [{ "program": "<vertex hash>", "fragment": "<fragment hash>", "rows": [x, y, w] }]: three
+		// fragment constants (as the shader reads them) that hold a world-to-texture projection made with the game's camera:
+		// the x, y and w rows, as in u = dot(p, x) / dot(p, w). The pass samples a target drawn per eye (Uncharted's water
+		// reflection projects the reflected ray into the half-resolution scene c31e0000), so each eye gets them remapped
+		// onto its own view: S x the eye's camera rows, S the game's clip-to-texture mapping solved from the game's rows and
+		// the draw's own camera block (which must be world to clip). Fork shader control RSX_SHADER_CONTROL_VR_FRAG_ROWS.
+		// "from_camera": true: the projected point is the game camera's position plus a direction (Uncharted's water: the
+		// camera position + the reflected view ray, 1 m out); each eye's rows then project its own position plus that
+		// direction (from the game camera's, the 3 cm eye offset and the head's translation moved the reflections against
+		// the scene, differently in each eye).
+		struct fragment_camera_rows_rule
+		{
+			u64 program = 0;
+			u64 fragment = 0;
+			std::array<u32, 3> rows{};
+			bool from_camera = false;
+			// "eye_position": the fragment constant holding the game camera's world position that the shader takes its view
+			// vector from (Uncharted's water: c52, normalize(c52 - position) reflected about the normal): each eye gets its
+			// own, so each eye reflects its own view ray and the reflections take their depth (with the game camera's, both
+			// eyes reflected the same direction at a point: the reflections lay on the water's surface).
+			u32 eye_position = umax;
+			// Or, without "rows": "ray": c, "view_vector": c: a full-screen pass that rebuilds view-space positions as
+			// (uv * c.xy + c.zw, 1) * depth with the game's view widths and dots them with a game-view vector (Uncharted's
+			// lighting pass: its height fog, c5 and c13). Each eye gets its own frustum's ray mapping and the vector turned
+			// into its view (with the game's, a head pitched up computed the fog for other heights and whitened it).
+			bool has_rows = false;
+			u32 eye_ray = umax;
+			u32 eye_view_vector = umax;
+		};
+		std::vector<fragment_camera_rows_rule> fragment_camera_rows;
+		// HUD-box draws in fixed mode keep the game's depth (z scaled by w'/w): the box
+		// changes w with the head pose, which reordered Shadow of the Colossus's depth-tested
+		// menu layers. Off by default: it broke ICO's HUD box.
+		bool screen_space_hud_keep_depth = false;
+		// screen_space.hud_over_scene: depth-tested HUD-box draws through the orthographic block go just in front of the
+		// near plane, so the scene never covers the box. The game depth-tests its menu against the scene's depth with its
+		// own (deep) z, which passes on the flat screen; in the headset the box covers other scenery, and near rock hid
+		// all but strips of Prince of Persia's pause menu as the head turned. The draws still test among themselves (in
+		// draw order: they share one depth).
+		bool screen_space_hud_over_scene = false;
+		// Frames without 3D (splash screens, videos, 2D menus) are shown on the fixed screen (where the HUD box is)
+		// instead of over the whole view, where they followed the head. Unset (auto): frames with no camera draws whose
+		// displayed buffer holds no 3D content either; a paused game re-showing its last 3D frame (Pure, WipEout: the
+		// pause HUD was drawn twice on the screen) stays in the headset view. true: every frame without camera draws
+		// (Ico, Demon's Souls, God of War). false: never.
+		enum class frames_without_3d_mode : u8
+		{
+			automatic,
+			always,
+			never
+		};
+		frames_without_3d_mode screen_space_frames_without_3d_as_screen = frames_without_3d_mode::automatic;
+
+		f32 reference_screen_width = 0.f; // metres; 0 = no Fixed Screen depth scaling
+
+		// Frame rate in VR (with the default patches). max_fps: the most the game works at
+		// (0 = no maximum; ICO 30); the VR "Frame Rate" setting offers nothing above it.
+		// default_fps: what "Default" runs, a rate current hardware reaches (0 = the
+		// headset's refresh rate; unset = max_fps, or 60 without one). vblanks_per_frame:
+		// vblanks per game frame (ICO 2), so the vblank runs at frame rate x this. Games of
+		// one collection share a configuration, so each profile sets its own default.
+		u32 max_fps = 0;
+		u32 default_fps = umax;
+		u32 vblanks_per_frame = 1;
+		// While the game has a video decoder open, the emulated vblank runs at most this fast (0 = no cap).
+		// Killzone HD's movie player (libsail) stops taking frames above 60 Hz: the intro stayed black.
+		u32 video_vblank_rate = 0;
+		// While VR renders, ZCULL reports run as with ZCULL Accuracy "Approximate" (any visible pixel counts as
+		// fully visible) instead of waiting for exact counts. Dragon's Dogma waits for its occlusion queries
+		// several times a frame; in stereo each wait is for both eyes' GPU work (~40% of the RSX thread at 4K per eye).
+		bool zcull_approximate = false;
+		// true: while VR renders, the RSX thread does not wait for occlusion query results (as Relaxed ZCULL Sync). SEGA Rally Revo.
+		bool zcull_relaxed_sync = false;
+		// "zcull_all_visible": true: while VR renders, every occlusion pixel-count report the game reads is answered at once
+		// with "visible" (0xffff): no wait for the GPU, nothing culled by a query. Uncharted: Precise ZCull's waits took ~23 %
+		// of the RSX thread; Approximate's stale answers made treetops vanish for a frame as the eyes moved.
+		bool zcull_all_visible = false;
+		// "zcull_no_wait": true: while VR renders, the RSX thread never waits for an occlusion result: a query the GPU has
+		// answered gives its real count (the game still culls what it knows is hidden), an unanswered one counts as visible
+		// (nothing wrongly vanishes). zcull_all_visible removed the waits but the game then drew everything it culls (+15-20 %
+		// draws in Uncharted's turned views, no gain there).
+		bool zcull_no_wait = false;
+		// orthographic_stereo: a game drawn with an orthographic camera (Fez) is shown on the fixed screen as a diorama.
+		// Depth-tested view draws through a camera block with no perspective (w = 1) get each eye's view turned by this
+		// angle (degrees) about the convergence depth (world units beyond the block's world origin): clip x moves by
+		// tan(angle) x the depth from there. 0 = off. convergence_z instead: the clip z of the convergence plane (Fez keeps
+		// the front of its playfield near clip z 0.507 in every scene, while the world origin's depth varies).
+		f32 orthographic_stereo_angle = 0.f;
+		f32 orthographic_stereo_convergence = 0.f;
+		f32 orthographic_stereo_convergence_z = 0.f;
+		// The part of the displayed frame that holds the game's 3D view, in output pixels (x, y, width, height;
+		// width 0 = the whole frame). The headset is shown only that part, so the view fills the eye. God of War
+		// renders its scene at 1216x684 and insets it in the 1280x720 display with a black border: the world looked
+		// ~5% smaller than the head's rotation, with black edges.
+		std::array<f32, 4> display_rect{};
+		// In stereo, memory copies (NV0039) into a display buffer are skipped. Killzone HD saves each finished frame to
+		// main memory and copies another memory image back into the display buffer; with Read Color Buffers the left
+		// eye was then reloaded from memory at 1x while the host-only right eye kept the scaled frame.
+		bool keep_rendered_display_buffers = false;
+		// Distance of the HUD box in metres when the HUD Depth setting is Auto (0 = the 2 m default).
+		// Killzone HD: 4 (its aiming reticule sat too close at 2 m).
+		f32 hud_depth = 0.f;
+
+		// The game builds effects across frames from full-screen buffers (Ico's glow and
+		// previous-frame blend): with the head moving between frames, older-pose buffers are
+		// shifted to the current pose (blend targets) and re-projected when read (feedback
+		// textures). Off by default: in other games it moved buffers that are not such effects
+		// (Pure: flashes, a bright square under the bike, and the paused frame floating in space).
+		bool reproject_older_frames = false;
+
+		// Guest floats holding the game's idea of the display refresh rate (Pure: PSGL
+		// device+0x14, game time = vblank count / it). Written every frame with the
+		// effective vblank rate, so the game keeps real-time speed at any vblank rate.
+		// "[0x1050300]+0x14" = the pointer at 0x1050300, plus 0x14; "0xd2f4dc" = that address.
+		struct guest_address
+		{
+			u32 address = 0;
+			bool deref = false;
+			// "[[0xPTR]+0xA]+0xB": the offsets added before each further dereference (here A), outermost last.
+			std::vector<u32> inner_offsets;
+			u32 offset = 0;
+			// game_vblank_frames_f32 only: { "address": "...", "scale": n } writes n x the value (Jak II: 5 x 60 / fps =
+			// its clocks' ticks of 1/300 s per frame).
+			f32 scale = 1.f;
+		};
+		std::vector<guest_address> game_refresh_rate_f32;
+		// Guest floats holding the game's time step for one frame (Ridge Racer 7: its
+		// 1/60 constants) and u32s holding its milliseconds per frame (Ridge Racer 7's race
+		// timer, read from a word its VR patch sets up): written every frame with the running
+		// game frame rate (effective vblank rate / vblanks_per_frame), so a frame-locked game
+		// keeps real-time speed at any VR frame rate. Same address forms as above.
+		std::vector<guest_address> game_frame_time_f32;
+		// The frame time squared and cubed (Ratchet & Clank keeps 1/60, 1/3600 and 1/216000 side by side).
+		std::vector<guest_address> game_frame_time_sq_f32;
+		std::vector<guest_address> game_frame_time_cube_f32;
+		std::vector<guest_address> game_frame_ms_u32;
+		// Floats holding milliseconds per frame (Dante's Inferno steps its clock by whole 16.68 ms
+		// frames, at least one per frame, so above 60 FPS it runs fast).
+		std::vector<guest_address> game_frame_ms_f32;
+		// u32s holding the game frame rate itself (Ridge Racer 7's VR patch advances its
+		// 60 Hz frame counters by 60/fps per frame from it).
+		std::vector<guest_address> game_fps_u32;
+		// Frames while a guest u32 holds one of the values are shown whole on the fixed screen, as with
+		// screen_frame_draws: for a front end drawn with the same programs and textures as gameplay, so no draw marks
+		// it (Super Stardust HD: its state word is 8 on the title, menus and game over, 9 in play and pause; the menus'
+		// 3D chrome text and slowly rolling background were uncomfortable in the headset).
+		struct screen_frames_when_rule
+		{
+			guest_address address;
+			std::vector<u32> values;
+		};
+		std::vector<screen_frames_when_rule> screen_space_screen_frames_when;
+		// native_rate_when: while a guest u32 holds one of the values, the vblank runs at most `rate` Hz (default 60),
+		// with or without VR: for scenes the game steps per frame instead of by time (Ratchet & Clank 2 and 3's
+		// in-engine cutscenes ran 1.5x fast at 90 Hz, out of sync with their audio).
+		struct native_rate_rule
+		{
+			guest_address address;
+			std::vector<u32> values;
+			u32 rate = 60;
+		};
+		std::vector<native_rate_rule> native_rate_when;
+		// head_aim: { "button": "L1", "full_stick_deg": 10, "min_stick": 0.15, "deadzone_deg": 0.75, "return_deg_per_s": 120,
+		// "mode": "relative" }. While the button is held in the headset view, head turns drive the right stick so the game's
+		// own camera (its aim) follows the head, and the view is held still while it turns (no double rotation): Uncharted's
+		// over-the-shoulder aim on L1. The VR setting "Head Aim" ("head_aim") switches it. See camera_probe::update_head_aim.
+		struct head_aim_rule
+		{
+			bool enabled = false;
+			u32 button_offset = 0; // CELL_PAD_BTN_OFFSET_DIGITAL1 / DIGITAL2
+			u32 button_mask = 0;   // CELL_PAD_CTRL_*
+			// Head-to-aim error (degrees) that gives a full stick; smaller errors scale down to min_stick.
+			f32 full_stick_deg = 10.f;
+			// The smallest stick deflection sent once the error is past deadzone_deg (past the game's own stick dead zone).
+			f32 min_stick = 0.15f;
+			// Errors under this angle send a centred stick.
+			f32 deadzone_deg = 0.75f;
+			// After the button is let go, the view turns back onto the game camera at this rate (degrees per second).
+			f32 return_deg_per_s = 120.f;
+			// A right stick pushed past this (0..1) while the button is held is the player's own: it is passed through, and
+			// the view turns with the game camera as usual (the head aim resumes from where it was when the stick returns).
+			f32 manual_stick = 0.3f;
+			// "relative" (default): head movement after the press moves the aim; "gaze": the aim goes to where the head
+			// points at the press.
+			bool gaze = false;
+			// The aim turns this many times as far as the head (relative mode): 1 keeps the aim on where the head looks,
+			// 2.5 turns it 25 degrees for 10 of head turn, so a small head movement sweeps the aim across the view.
+			f32 gain = 1.f;
+			// "direct": { "address": "0x...", "yaw_sign": -1, "pitch_sign": -1 }: instead of the right stick, a patch turns
+			// the game camera's own aim state (what the stick moves) by the head's turn: the probe writes running totals in
+			// degrees at address (f32 yaw, f32 pitch), the patch keeps what it has applied at +8 / +12 and turns the camera
+			// by the difference each frame; +16 (u32) is 1 while head aim drives (the patch can skip the camera's
+			// smoothing then). The signs give the totals' direction for an aim turned right / up.
+			bool direct = false;
+			guest_address direct_address;
+			f32 direct_yaw_sign = 1.f;
+			f32 direct_pitch_sign = 1.f;
+		} head_aim;
+		// culling_scale_f32: { "address": "0x...", "fov_deg": 60, "aspect": 1.7778, "margin_deg": 6, "min": 1.0, "max": 2.5 }.
+		// A culling-widening patch's scale word (the game culls against fov_deg x scale high, at its aspect), written
+		// each frame in the headset view with the smallest scale whose frustum holds the headset's at the current head
+		// pose plus margin_deg: wide culling only while the head is turned away from the game camera. SEGA Rally's
+		// Wider view at 2.0 made 2-4k draws a frame and missed 90 Hz; looking ahead needs ~1.5.
+		struct culling_scale_rule
+		{
+			guest_address address;
+			f32 fov_deg = 60.f;
+			f32 aspect = 16.f / 9.f;
+			f32 margin_deg = 6.f;
+			f32 min = 1.f;
+			f32 max = 2.5f;
+			// "mode": "tangent": the scale divides the game's projection (x and y tangents x scale), so it is the tangent
+			// ratio; "tangent_x": the same for the horizontal axis alone, sized by the headset's horizontal extent (Gran
+			// Turismo 5's Wider view: a racing game is looked around left and right); default "angle": the FOV angle x
+			// scale (SEGA Rally).
+			bool tangent = false;
+			bool horizontal = false;
+			// "tangent_y": the vertical axis alone (the half-height tangent), for a patch that scales the projection's
+			// axes by separate words (God of War III: the headset needs ~2x the game's width but ~4x its height).
+			bool vertical = false;
+			// "step": the scale moves in steps of this size and falls back only when a whole step is no longer needed, so
+			// small head movements leave it (and the game's shadow-map fit to its frustum: Gran Turismo 5) unchanged.
+			// 0: continuous (up at once, down 0.01 a frame).
+			f32 step = 0.f;
+			// "lead_s": the margin also grows by the head's turn speed times this many seconds, so the game's culling
+			// (one or two frames behind the head) still holds the leading edge while the head turns: scenery and the
+			// shadows it casts into view don't drop out during the turn (Uncharted's jungle). 0: off.
+			f32 lead_s = 0.f;
+			// "hold_s": the scale only falls once the head has been still (under 5 degrees per second) this long, so a
+			// word that something is fitted to (Uncharted's shadow cascades) only grows during a head movement. 0: off.
+			f32 hold_s = 0.f;
+			// "option": "vertical_view" / "horizontal_view": the VR setting Vertical View / Horizontal View (%) scales how far
+			// this word widens past the game's own view (100: all the headset needs; 0: the game's own culling). For games
+			// where the widening is costly (Uncharted's boat: 88 FPS at the game's view, ~57 with the full widening).
+			bool vertical_view_option = false;
+			bool horizontal_view_option = false;
+			// "option": "shadow_coverage": the VR setting Shadow Coverage (%) scales the widening the same way, for words a
+			// shadow-map fit uses: the map's resolution is fixed, so a wider fit gives coarser, steadier-to-swim texels
+			// (Uncharted: at the full headset view x 3 / y 6, jagged sun patches that flicker as the camera turns).
+			bool shadow_coverage_option = false;
+			// "head_turn_only": true: widen by the head turn alone, the game's own half-angle around the direction the
+			// head looks (straight ahead: the game's culling, so the headset view's edges can miss scenery). Gran
+			// Turismo 5 looking ahead: scale 1.0 instead of 2.0, ~1.2 ms of the RSX thread on a busy race. Default: the
+			// whole headset view at the current pose plus margin_deg (MotorStorm: Pacific Rift, SEGA Rally's scenery).
+			bool head_turn_only = false;
+		};
+		std::vector<culling_scale_rule> culling_scale_f32;
+		// option_f32: { "address": "0x...", "option": "highest_detail", "on": -8, "off": 100 }. A patch's word written each
+		// frame with "on" or "off" by the VR setting the option names (profile_option_enabled), so a game setting a patch
+		// reads can be changed live from the home menu. MotorStorm: Pacific Rift's level-of-detail bias limit.
+		struct option_f32_rule
+		{
+			guest_address address;
+			std::string option;
+			f32 on = 1.f;
+			f32 off = 0.f;
+		};
+		std::vector<option_f32_rule> option_f32;
+		// Floats holding the length of one vblank in 60 Hz frames (1.0 at 60 Hz), written with 60 / the effective
+		// vblank rate. For games that count vblanks as 1/60 s: Kingdom Hearts' frame step is the elapsed vblanks
+		// times this factor (through a patch that reads it), so it stays real-time at the headset's rate.
+		std::vector<guest_address> game_vblank_frames_f32;
+
+		// The game composites the previous frame's scene (ICO: left over from SPU
+		// MLAA) with effects built from the current one (bloom). Each frame carries
+		// its own head rotation, so the two disagree when the head turns. Copies
+		// (blits) of a scene target drawn in an earlier frame read the matching
+		// target drawn in this frame instead.
+		bool current_frame_copies = false;
+
+		// Camera draws into off-aspect targets with the player's projection (output aspect) follow
+		// the head like the scene, keeping their viewport: views the scene samples at its own screen
+		// position (Ridge Racer 7's road reflection tiles, 128x128 in a 512x128 target). Off by
+		// default: other off-aspect targets keep the game camera in both eyes.
+		bool offaspect_player_views = false;
+
+		// Depth-tested draws into the scene that no camera block covers (the matrix folded
+		// with an object's so it is not rigid, in another slot or layout, or skinned from the
+		// whole constant bank) take the latest camera draw's eye transform, B^-1 * B_eye,
+		// after their own program: the object part of B cancels, so any draw through the same
+		// camera lands where the eye sees it. Draws that sample a colour render target
+		// (post-processing) and the HUD are left alone. Off by default (experimental); the
+		// profile generator sets it when camera blocks cover few scene draws (Demon's Souls).
+		bool clip_space_scene_draws = false;
+
+		// Guest memory the game copies its depth buffer into for its own occlusion culling
+		// on the CPU/SPUs (Shadow of the Colossus, every frame). In stereo that depth is the
+		// eye's, not the game camera's, so the culling hides visible objects (flashing holes,
+		// popping), and the read waited for almost the whole stereo scene. Reads there get
+		// far depth everywhere at once: nothing is culled by occlusion. "0xADDR:0xSIZE" each.
+		std::vector<std::pair<u32, u32>> occlusion_depth_readback;
+		// skip_readback_sections: texture-cache sections starting at these addresses are never read back (memory is left as
+		// the guest wrote it). For render targets RPCS3 keeps over texture memory that nothing draws into any more: Gran
+		// Turismo 5's 512x512 at 0xc9db5a80, read back once a frame because the track textures inside it are uploaded.
+		std::vector<u32> skip_readback_sections;
+		// late_readback_sections / late_readback_lengths: sections starting at these addresses, or of exactly these
+		// lengths in bytes, are read back without waiting for the GPU. A read before the GPU copy finished leaves the
+		// guest's memory as it is (the value of an earlier frame) and the result is written there when the copy lands
+		// (next flip). For small results the game reads every frame and can take a frame late: Gran Turismo 5's 16x8
+		// exposure (512 bytes, a ring of three whose address changes per session), whose read waited for the whole
+		// stereo scene.
+		std::vector<u32> late_readback_sections;
+		std::vector<u32> late_readback_lengths;
+		// min_scalable_dimension: raises the game's Minimum Scalable Dimension (render targets whose larger side is at
+		// most this many pixels are not scaled by the Resolution Scale) while VR is enabled. For small off-screen passes
+		// the scale multiplies like the view (16x the pixels at 400%) for no visible gain: Gran Turismo 5's 256x511
+		// reflection maps and 512-wide exposure and glare passes (~2 ms a frame at 400% in stereo).
+		u16 min_scalable_dimension = 0;
+		// "boosted_targets": [{ "size": "2432x1216", "depth_only": true, "scale": 4.0 }]: render targets of that guest size
+		// (with depth_only: bound with no colour target, e.g. a shadow map) are rendered at the Resolution Scale times
+		// `scale` per axis, capped at 16384 pixels. For shadow maps a Wider view stretches over the headset view (Uncharted:
+		// the fit is 3x wider and 6x taller, so each shadow texel was 3-6x larger: jagged edges that swam with the camera).
+		// While such a target is bound the renderer's scaling config is swapped for the boosted one (the surface keeps
+		// its own config, which everything reading it uses); it goes back at the next target change and at each flip.
+		struct boosted_target
+		{
+			u16 width = 0, height = 0;
+			bool depth_only = false;
+			f32 scale = 1.f;
+		};
+		std::vector<boosted_target> boosted_targets;
+		// image_pool_mb: the texture cache's pool of temporary images (copies of render-target parts, kept between frames
+		// for reuse) may hold this many MB, and 4x upstream's 256 images, while stereo renders. For games that make
+		// hundreds of copies a frame: the pool was halved every frame and the images destroyed and created again. Their
+		// memory is in use during the frame anyway, so keeping them raises the peak little. God of War III: ~300
+		// shadow-map part copies a frame, `12000`. 0: the default limit (vr_cached_image_pool_limit).
+		u32 image_pool_mb = 0;
+		// car_draw_limit: { "tiers": [{ "cars": n, "draws": d, "min_vertices": v }, ...], "body_programs": [...] }
+		// (VKGSRenderVR.cpp vr_skip_far_cars): the cars by distance, tier by tier (cars 0: all the rest); draws -1 all
+		// (the default), 0 none, n only the first n of the car's body pass; min_vertices: body-pass draws with fewer
+		// vertices are left out (small parts: badges, lights, trim); keep_percent: only the car's largest body-pass
+		// draws making up that share of its body-pass vertices are drawn (the cut-off adapts to each car model: one
+		// built from many mid-size pieces keeps more of them). The later pass (glass) is always drawn. Gran Turismo 5
+		// draws each car as 110-165 draws at any distance, and the RSX thread is the limit with many cars.
+		struct car_draw_tier
+		{
+			u32 cars = 0;
+			s32 draws = -1;
+			u32 min_vertices = 0;
+			u32 keep_percent = 0;
+			f32 min_distance = 0.f; // when any tier has one, tiers are chosen by the car's view depth (metres) instead of its rank
+		};
+		std::vector<car_draw_tier> car_draw_tiers;
+		std::vector<u64> car_body_programs;
+		std::string car_draw_option; // "option": the VR setting that switches car_draw_limit (profile_option_enabled)
+		u32 car_full_nearest = 0;    // "full_nearest": with distance tiers, the nearest n cars stay complete at any distance
+
+		// Profile shared_frame_targets: render targets of this size are each drawn (and cleared) only every `frames`
+		// frames, in turn by target address, and keep their content in between. For passes that redraw slowly
+		// changing content into several targets every frame: Gran Turismo 5's six 256x256 environment cube faces
+		// (534 of 2,650 draws on a busy frame), with frames 3 two faces are refreshed a frame.
+		struct shared_frame_target
+		{
+			u16 width = 0;
+			u16 height = 0;
+			u32 frames = 2;
+			std::string option; // the VR setting that switches this rule (profile_option_enabled)
+		};
+		std::vector<shared_frame_target> shared_frame_targets;
+		// Profile small_draw_cull: draws of at most max_vertices vertices into render targets of this size are skipped.
+		// For a pass that redraws the scene into a small map where small pieces cannot be seen: SEGA Rally's two 512x512
+		// car reflection maps (one a frame, ~1,370 draws at the race start, ~890 of them 48 vertices or fewer).
+		struct small_draw_cull
+		{
+			u16 width = 0;
+			u16 height = 0;
+			u32 max_vertices = 0;
+			std::string option; // the VR setting that switches this rule (profile_option_enabled)
+		};
+		std::vector<small_draw_cull> small_draw_culls;
+
+		// The stereo rule for a render target this wide.
+		const stereo_rule& stereo_for(u32 target_width, u32 output_width) const;
+	};
+
+	// Load and validate bin/vr_profiles/<title_id>.json. Null (with the reason
+	// logged) when the file is missing or invalid.
+	// The running executable's file name, lower case, without extension ("shadow" for shadow.self).
+	std::string running_executable_name();
+
+	// vr_profiles/<TITLE_ID>.<executable>.json if present (one game of a collection), else <TITLE_ID>.json.
+	std::shared_ptr<const title_profile> load_title_profile(std::string_view title_id, std::string_view executable = {});
+
+	// map_vr_preprojected's program for a clip_space_scene_draws draw (no listed program).
+	constexpr u64 scene_draw_program = umax;
+
+	// True if this title id has a valid VR profile. Only profiled titles can be
+	// rendered in stereo, so the VR options are offered for those alone.
+	bool title_has_profile(std::string_view title_id);
+
+	// The headset's display refresh rate (Hz, rounded) while an OpenXR session
+	// runs; 0 clears it.
+	void set_headset_refresh_rate(u32 hz);
+
+	// framegen: DLSS Frame Generation runs (VKFrameGen.h): the game renders at half the VR frame rate (the headset still
+	// gets every frame, half of them generated).
+	void set_framegen_active(bool active);
+	// The frame-rate multiplier while it runs (2 or 3): the game renders at the VR frame rate divided by it.
+	void set_framegen_multiplier(u32 multiplier);
+	// The most generated frames per rendered frame this GPU's DLSS-G makes (MultiFrameCountMax, capped by the outputs).
+	void set_framegen_max_generated(u32 count);
+	// The headset's frame cadence measured by the OpenXR frame thread (Hz, rounded; 0 clears it), for runtimes without
+	// XR_FB_display_refresh_rate (SteamVR, the simulator). Used only by frame generation's rate conversion.
+	void set_headset_cadence(u32 hz);
+	// framegen rate conversion: with frame generation on and a VR Frame Rate below the headset's refresh (60 on a 90 Hz
+	// headset), the game keeps that rate and every headset frame between two game frames is generated at its own moment.
+	// game : display is the reduced ratio (60 -> 90: 2 game frames per 3 headset frames). False when it does not apply
+	// (frame rate at or above the refresh, refresh unknown, or more generated frames per pair than the GPU makes).
+	bool framegen_rate_conversion(u32& game, u32& display);
+
+	// Toggle HUD (pad button "VR Toggle HUD", game window shortcut): while hidden, the HUD-box draws of frames with a 3D
+	// scene are not drawn (menus and frames without a camera draw keep theirs).
+	void toggle_hud();
+	bool hud_hidden();
+	// A pad's Toggle HUD button state, polled with the pad (each press toggles; pad: any per-pad key).
+	void pad_toggle_hud_button(const void* pad, bool pressed);
+	// Head aim (profile head_aim): called by the pad thread with player 1's pad after its external buttons and sticks are
+	// built. While the profile's button is held in the headset view, replaces the right stick with the head-to-aim error.
+	void head_aim_pad(Pad& pad);
+
+	// A headset session is running (the VR frame rate applies).
+	void set_headset_active(bool active);
+
+	// Multiview stereo (Vulkan): both eyes are drawn by one draw into two-layer render targets.
+	// While set, vertex and fragment programs carry RSX_SHADER_CONTROL_VR_MULTIVIEW, which selects
+	// the shader variants that read per-view draw parameters and sample array textures.
+	void set_multiview_active(bool active); // multiview_active(): rsx_vr_hooks.h
+
+	// The VR "Frame Rate" option at this index (vr_frame_rate): its frame rate, 0 for
+	// Unlimited, umax for Default.
+	u32 frame_rate_option_fps(u32 option);
+	// Whether a game with this max_fps lists the option (Default always).
+	bool frame_rate_option_allowed(u32 option, u32 max_fps);
+
+	// Profile rules tagged "option": "reflections" | "mirror" | "distant_cars" | "highest_detail" | "simpler_vehicles" |
+	// "fewer_shadows" | "head_aim" follow the VR settings Reduced-Rate Reflections, Reduced-Rate Mirror, Simpler Distant
+	// Cars, Highest Detail Models, Simpler Other Vehicles, Fewer Shadows and Head Aim (live). Untagged rules and unknown
+	// names are always on.
+	bool profile_option_enabled(const std::string& option);
+	// The home menu shows a setting only for games whose profile has a rule tagged with it.
+	bool profile_has_option(const title_profile& profile, std::string_view option);
+	// Profile fragment_camera_rows: the rule for a vertex and / or fragment ucode hash (0 = any), or null.
+	const title_profile::fragment_camera_rows_rule* fragment_camera_rows_rule(u64 vertex_ucode_hash, u64 fragment_ucode_hash);
+	// The highest max_fps among the title's profiles (0 = no maximum), for the settings
+	// dialog, which cannot tell which game of a collection will run.
+	u32 title_max_fps(std::string_view title_id);
+	// The distinct default_fps of the title's profiles, ascending (0 = the headset's rate).
+	std::vector<u32> title_default_fps(std::string_view title_id);
+	// Each game of the title (its profile name, else its executable) with its default and
+	// maximum frame rates, for the settings dialog.
+	struct title_game_frame_rate
+	{
+		std::string name;
+		u32 default_fps = 0;
+		u32 max_fps = 0;
+	};
+	std::vector<title_game_frame_rate> title_frame_rates(std::string_view title_id);
+	// The Frame Rate option for this rate (0 = Unlimited), umax if none.
+	u32 frame_rate_option_for_fps(u32 fps);
+
+	// The running game's frame rate in VR (0 = the headset's refresh rate). Halved while frame generation runs.
+	u32 effective_frame_rate();
+
+	// effective_vblank_rate(): declared in rsx_vr_hooks.h.
+
+	// Writes the effective vblank rate to the profile's game_refresh_rate_f32 targets.
+	// Called once per frame by the RSX thread.
+	void update_game_refresh_rate();
+	// Writes the profile's culling_scale_f32 words from the head pose. Called once per frame by the RSX thread.
+	void update_culling_scale();
+	// Writes the profile's option_f32 words from their VR settings. Called once per frame by the RSX thread.
+	void update_option_words();
+	// The draw path: a draw matching the profile's frame_rate_draws was made (see title_profile::frame_rate_draws).
+	void note_frame_rate_draw(u32 index);
+	// Each game flip (rsx::thread::handle_emu_flip): measures the real frame rate update_game_refresh_rate falls back to.
+	void note_game_flip();
+	// RPCS3_VR_FRAMESTATS: a hash of the frame's first game camera (0: no camera draw since the last call), so the stats
+	// count new frames apart from flips that repeat one (Sonic's renderer replays its last frame between game steps).
+	u64 take_frame_camera_hash();
+
+	// True while one of the profile's screen_frames_when words holds one of its values (the frame goes on the fixed
+	// screen). Reads guest memory: call once per frame.
+	bool screen_frame_by_game_state();
+
+	// Reprojection Margin in degrees: the configured value, or for "Auto" (-1) 10 degrees
+	// when the game runs below the headset's refresh rate and 0 when it does not.
+	u32 effective_reprojection_margin();
+	// HUD box distance in metres: the HUD Depth setting, or with Auto the VR profile's hud_depth, else 2 m.
+	f32 effective_hud_depth();
+
+	// vk::cached_texture_section::imp_flush, before waiting for the GPU: true when the fork answers the readback itself.
+	// The section starts at one of the profile's skip_readback_sections (memory left as it is), or, while stereo is
+	// rendered, [start, end] overlaps the profile's occlusion_depth_readback (memory filled with far depth).
+	bool occlusion_depth_readback(u32 start, u32 end, void* memory);
+
+	// While alive, full-bank constant uploads (programs with indexed constants) expose only the slots
+	// in `ids` (the program's directly read constants) to camera block matching on this thread. Null or
+	// empty ids: no restriction. VKGSRender sets it per draw for profiles with camera_slots_read_directly.
+	struct full_bank_direct_slots
+	{
+		explicit full_bank_direct_slots(const std::vector<u16>* ids);
+		~full_bank_direct_slots();
+		full_bank_direct_slots(const full_bank_direct_slots&) = delete;
+		full_bank_direct_slots& operator=(const full_bank_direct_slots&) = delete;
+	};
+
+	class camera_probe
+	{
+	public:
+		static camera_probe& get()
+		{
+			// Inline: called many times per draw (out of line it was ~1% of the RSX thread).
+			static camera_probe instance;
+			return instance;
+		}
+
+		// Hot-path gate. False unless a perturbation is currently configured.
+		bool enabled() const
+		{
+			return m_active.load();
+		}
+		bool render_enabled() const;
+		// Probe "hide=<hash>[@<target>][+...]": vertex or fragment programs (ucode hashes) whose draws are skipped, optionally
+		// only into one colour target (hex address), to find which program draws an artefact. Empty unless set.
+		// The headset eye's view: the head rotation (eye view = R x the game camera's view, x right, y up, z forward) and
+		// the eye's frustum tangents (left, right, up, down), and this frame's game projection scales (the scene camera's);
+		// false without a headset view.
+		bool vr_eye_view(f32 eye_sign, std::array<f32, 9>& rot, std::array<f32, 4>& tangents, std::array<f32, 2>& game_proj) const
+		{
+			if (!m_vr_view || !m_vr_hmd_fov || !(m_scene_proj_x > 0.f) || !(m_scene_proj_y > 0.f))
+				return false;
+			rot = m_vr_rot;
+			game_proj = {m_scene_proj_x, m_scene_proj_y};
+			const f32* t = m_vr_eye_fov[eye_sign < 0.f ? 0 : 1];
+			tangents = {t[0], t[1], t[2], t[3]};
+			return true;
+		}
+		const std::vector<std::pair<u64, u32>>& hidden_programs() const
+		{
+			return m_hidden_programs;
+		}
+		u64 why_program() const
+		{
+			return m_why_program;
+		} // probe why=<vertex hash>: log that program's VR classification
+		// Probe gamecam=<hash>[+<hash>...]: these vertex programs keep the game camera in the right eye (development).
+		const std::vector<u64>& game_camera_programs() const
+		{
+			return m_game_camera_programs;
+		}
+		// gamecam=<hash>@nocolor: only that program's draws with every colour write off (depth/stencil passes).
+		const std::vector<u64>& game_camera_nocolor_programs() const
+		{
+			return m_game_camera_nocolor_programs;
+		}
+		// Probe "dev=<bits>": renderer switches for live A/B measurements (see their users). 0 unless set.
+		u32 dev_flags() const
+		{
+			return m_dev_flags;
+		}
+		// Probe "unboxfp=<id>[+<id>...]": fragment program session ids (inspector fp_session_id) left out of the HUD box.
+		bool unboxed_fragment_program(u32 id) const
+		{
+			return std::find(m_unbox_fp.begin(), m_unbox_fp.end(), id) != m_unbox_fp.end();
+		}
+		// The draw about to be bound samples a colour render target (post-processing).
+		void set_draw_samples_colour_target(bool v) const
+		{
+			m_draw_samples_colour_target = v;
+		}
+		// Any colour render target, also a small one (a luminance chain, a mask): see m_draw_samples_any_colour_target.
+		void set_draw_samples_any_colour_target(bool v) const
+		{
+			m_draw_samples_any_colour_target = v;
+		}
+		void set_draw_into_display_buffer(bool v) const
+		{
+			m_draw_into_display_buffer = v;
+		}
+		// The vertex program ucode hash of the draw about to be bound (only set while the profile needs it:
+		// screen_space.hud_block_programs).
+		void set_draw_program(u64 v) const
+		{
+			m_draw_program = v;
+		}
+		// hud_box_after_shader: the last bound draw is a HUD draw whose box the renderer applies.
+		bool hud_env_requested() const
+		{
+			return m_hud_env_request;
+		}
+		// subviewport_cameras_in_box: a scissored clear through a sub-viewport of a view target (the
+		// rear-view mirror's) moves into the box with the draws. rect: host pixels x1, y1, x2, y2, in
+		// the left eye; right_rect receives the right eye's (shifted by the HUD parallax).
+		// quads (optional): each eye's (left, right) image of the clear's four corners in host pixels, in the order
+		// (x1, y1), (x2, y1), (x1, y2), (x2, y2): turned with the head the box shows the rectangle as a slanted quad.
+		bool map_subviewport_clear(f32 host_scale_x, f32 host_scale_y, u32 surface_w, u32 surface_h, f32 host_width, f32 host_height, f32 rect[4], f32 right_rect[4], f32 (*quads)[4][2] = nullptr) const;
+		void clear_hud_env_request() const
+		{
+			m_hud_env_request = false;
+		}
+		// The draw about to be bound has depth test enabled.
+		void set_draw_depth_test(bool v) const
+		{
+			m_draw_depth_test = v;
+		}
+		// Profile screen_space.scaled_draws: this draw's size factor in the HUD box (1 = as drawn).
+		void set_draw_hud_depth(f32 v) const
+		{
+			m_draw_hud_depth = v;
+		}
+		void set_draw_hud_scale(f32 v) const
+		{
+			m_draw_hud_scale = v;
+		}
+		// HUD box scissor: map_vr_screen_box records its transform; the renderer maps the game's
+		// scissor (host pixels, window y down) through it so HUD clipping lands in the box, and
+		// anything the game parked outside its screen stays clipped. Call clear before each eye.
+		// Dev (probe why=): the headset state the boxing rules test: bit 0 view, bit 1 FOV, bit 2 projection known.
+		u32 vr_state_bits() const
+		{
+			return (m_vr_view ? 1u : 0u) | (m_vr_hmd_fov ? 2u : 0u) | (m_vr_proj_valid ? 4u : 0u);
+		}
+		void clear_box_mapped() const
+		{
+			m_box_mapped = false;
+			m_depth_remap_valid = false;
+		}
+		// The draw just bound (since clear_box_mapped) was mapped into the HUD box through its constants.
+		bool box_mapped() const
+		{
+			return m_box_mapped;
+		}
+		bool map_box_scissor(f32 host_scale_x, f32 host_scale_y, f32 host_width, f32 host_height, f32 rect[4], f32 (*corners)[2] = nullptr) const;
+		// The current viewport is smaller than the shown part of its target (a sub-viewport: GT5's mirror).
+		bool viewport_inside_shown_region() const;
+		// Profile depth_remap_programs: for the draw just bound (since clear_box_mapped), the matrix taking the eye's
+		// (NDC x, NDC y, window depth, 1) to the game's, homogeneous (row vector times matrix: 4 rows). False when no
+		// camera block of the draw took an eye transform (the identity then applies).
+		bool depth_remap_matrix(f32 (&out)[4][4]) const;
+		// Profile depth_remap_screen: the same matrix for a draw without a camera block, from the latest scene camera
+		// draw's game and eye matrices for this eye. False before the eye has a scene camera draw.
+		bool screen_depth_remap(f32 eye_sign) const;
+		// The game camera's projection x and y scales (P00, P11), for depth_remap_ray_texcoord. False when unknown.
+		bool game_projection_scale(f32& x, f32& y) const;
+		// The profile's clip_space_scene_draws, unless the probe file overrides it (scene=0/1).
+		bool scene_draws_by_clip_space() const;
+
+		// Load the title's profile again on next use (a generated one was just
+		// written). Only safe while no profile is loaded: the old one is freed.
+		void reload_profile();
+
+		// Frame boundary: re-read RPCS3_VR_PROBE_FILE if it changed.
+		void poll();
+
+		// Perturb a freshly filled transient constant buffer in place.
+		// reloc_table_data/size describe the original guest index of each 16-byte
+		// slot in the buffer; an empty table means the buffer holds the full
+		// 468-slot bank at its natural indices.
+		// guest_constants points at the pristine 512x u32[4] guest bank.
+		// surface_w/h: the draw's render-target size, used by the draw classifier.
+		void apply(void* buffer, const u16* reloc_table_data, usz reloc_table_size,
+			const void* guest_constants, u16 surface_w, u16 surface_h) const;
+
+		// Apply the title profile's native-eye transform to a freshly cloned
+		// constant buffer. Returns true only when this is a perspective,
+		// output-aspect world draw and its camera matrix was sheared. The camera
+		// position slot is adjusted independently whenever the draw carries both
+		// it and a usable perspective camera block (including the shared shadow route).
+		bool apply_render_eye(void* buffer, const u16* reloc_table_data, usz reloc_table_size,
+			u16 surface_w, u16 surface_h, f32 eye_sign) const;
+
+		// Human-readable description of the active probe, for logging.
+		const std::string& description() const
+		{
+			return m_description;
+		}
+
+		// The running title's VR profile, loaded on first use for each title.
+		// Null when the title has none.
+		const title_profile* profile() const;
+		const title_profile* profile_slow() const;
+
+		// Gate 6 headset view. quat_xyzw is the OpenXR head orientation (LOCAL
+		// space) the next frame is rendered with. While set, output-aspect camera
+		// draws are rotated by it and the stereo becomes parallel (translation
+		// term only). eye_scale multiplies the game's eye separation, fov_scale
+		// widens the rendered field of view. flip_y if NDC +Y is screen-down.
+		// position_xyz is the head position in LOCAL space (metres); camera_offset is a
+		// constant offset of the viewpoint (metres: x right, y up, z forward). Both are
+		// converted to game units using the game's own eye separation against ipd.
+		void set_vr_view(const f32 quat_xyzw[4], const f32 position_xyz[3], f32 eye_scale,
+			f32 fov_scale, bool flip_y, f32 ipd, const f32 camera_offset[3]);
+		void clear_vr_view();
+		// The headset view's head rotation in the game camera's clip basis (see m_vr_rot) and the largest rendered
+		// tangents of both eyes (x, y). False without a headset view.
+		bool vr_view_rotation(std::array<f32, 9>& rotation, f32& tan_x, f32& tan_y) const;
+		// Each eye's rendered and visible tangents (left, right, up, down; left and down negative). False without a
+		// headset view.
+		bool vr_eye_fovs(f32 (&rendered)[2][4], f32 (&visible)[2][4]) const;
+
+		// Native (non-headset-view) stereo: scale the game's eye separation, for
+		// showing its stereo on a screen larger than the one it was tuned for.
+		void set_screen_stereo_scale(f32 scale);
+
+		// Render each eye into exactly this frustum instead of the game's own:
+		// tangents (left, right, up, down) per eye, left/down negative, as
+		// reported by the headset. Pass nullptr to keep the game's FOV.
+		// Screen-space draws (HUD, menus) become a fixed output-aspect box fitted
+		// inside the headset view, times hud_scale: head-locked, or with hud_fixed
+		// anchored straight ahead in LOCAL space so the head can turn away from it.
+		// hud_offset_x/y move the box centre by that fraction of the central view's
+		// half-width/half-height (+ is right/up). hud_depth (metres, 0 = infinity)
+		// places it at that stereo distance for eyes ipd metres apart.
+		// tangents are the rendered eye frustums (the visible ones plus the
+		// reprojection margin); the HUD box is sized from the visible ones.
+		void set_vr_eye_fov(const f32 (*tangents)[4], const f32 (*visible)[4], f32 hud_scale, bool hud_fixed,
+			f32 hud_offset_x, f32 hud_offset_y, f32 hud_depth, f32 ipd);
+
+		// tan of the rendered half-angles, measured from the camera draws
+		// (including fov_scale). False until a rigid camera block has been seen.
+		// Also the readiness test for the headset-FOV remap.
+		bool get_vr_fov(f32& tan_half_x, f32& tan_half_y) const;
+		bool vr_hud_fixed() const
+		{
+			return m_vr_hud_fixed;
+		}
+
+	private:
+		camera_probe();
+		void parse(const std::string& cfg);
+		void reset_params();
+		// refresh_projection: the block may update the cached projection scale (false for camera-facing sprites).
+		void apply_vr_rotation(f32* const rows[4], const std::array<f32, 9>& R, const std::array<f32, 3>& head, bool refresh_projection = true) const;
+		void apply_vr_screen_space(const title_profile& profile, void* buffer, const u16* reloc_table_data, usz reloc_table_size,
+			u16 surface_w, u16 surface_h, f32 eye_sign) const;
+		void map_vr_screen_box(f32* const rows[4], f32 eye_sign, f32 aspect) const;
+		bool apply_orthographic_eye(const title_profile& profile, void* buffer, const u16* reloc_table_data, usz reloc_table_size,
+			u16 surface_w, u16 surface_h, f32 eye_sign) const;
+
+		bool m_enabled = false;         // subsystem on (default render path or probe config)
+		atomic_t<bool> m_active{false}; // a perturbation is configured right now
+
+		std::string m_config_path;
+		u64 m_config_stamp = 0;
+		u64 m_config_poll_us = 0; // last probe-file check
+		// Live reload: the running title's profile files (time and size), checked twice a second.
+		u64 m_profile_file_stamp = 0;
+		u64 m_profile_file_check_ms = 0;
+
+		std::string m_description;
+		std::string m_title; // probe override (title=); empty = the running title
+
+		// Cached profile of the running title (see profile()).
+		mutable std::mutex m_profile_mutex;
+		mutable std::string m_profile_title;
+		mutable std::string m_profile_title_id; // what the cached key was built from (per-draw fast path)
+		mutable std::string m_profile_boot;
+		// Per-frame fast path: profile() revalidates at most once per frame (poll() clears the flag);
+		// it was called several times per draw, each taking the mutex and comparing strings.
+		mutable atomic_t<bool> m_profile_fast_valid{false};
+		mutable atomic_t<const title_profile*> m_profile_fast{nullptr};
+		mutable std::shared_ptr<const title_profile> m_profile;
+
+		// Probe overrides (base=, cam=); umax = the profile's.
+		u32 m_base = umax;
+		u32 m_cam_slot = umax;
+
+		f32 m_yaw = 0.f, m_pitch = 0.f, m_roll = 0.f;
+		f32 m_tx = 0.f, m_ty = 0.f, m_tz = 0.f;
+		f32 m_eye = 0.f;
+		f32 m_stereo_sep = 0.f;
+		f32 m_stereo_conv = 0.f;
+		bool m_have_stereo = false;
+		bool m_render_enabled = false;
+		std::vector<std::pair<u64, u32>> m_hidden_programs;
+		u64 m_why_program = 0;
+		std::vector<u64> m_game_camera_programs;
+		std::vector<u64> m_game_camera_nocolor_programs;
+		u32 m_dev_flags = 0;
+		std::vector<u32> m_unbox_fp;
+		s32 m_scene_override = -1; // probe file scene=0/1; -1 = the profile's
+		mutable bool m_draw_samples_colour_target = false;
+		// A bare-projection quad sampling any colour render target is a pass (The Darkness' HDR luminance chain
+		// reads 324x18 targets); the HUD ortho path counts only view-shaped ones (m_draw_samples_colour_target).
+		mutable bool m_draw_samples_any_colour_target = false;
+		mutable bool m_draw_into_display_buffer = true;
+		mutable u64 m_draw_program = 0;
+		mutable bool m_hud_env_request = false;
+		mutable bool m_draw_depth_test = true;
+		mutable f32 m_draw_hud_scale = 1.f;
+		mutable f32 m_draw_hud_depth = 0.f; // metres, 0: the HUD depth (screen_space.scaled_draws depth)
+		f32 m_vr_ipd = 0.f;
+		mutable bool m_box_mapped = false;
+		mutable bool m_box_identity_pass = false;
+		mutable f32 m_box_map[4][4] = {};
+
+		// c[465] is global camera state. Shadow cascades carry a perspective
+		// c[260] block whose clip-X axis is *not* camera right, so retain the
+		// most recent output-aspect camera-right axis for their c[465] policy.
+		// RSX draw processing is serialized on the renderer thread.
+		mutable std::array<f32, 3> m_render_camera_right{};
+		mutable bool m_render_camera_right_valid = false;
+
+		// Gate 6 headset view (see set_vr_view). m_vr_rot is the head rotation
+		// transposed, expressed in the draw's clip basis (NDC x, NDC y, clip w).
+		bool m_vr_view = false;
+		// mutable: head aim (update_head_aim) turns it by m_aim_off at the frame's first camera draw.
+		mutable std::array<f32, 9> m_vr_rot{};
+		f32 m_vr_eye_scale = 1.f;
+		f32 m_vr_fov_scale = 1.f;
+		bool m_vr_flip_y = false;
+		bool m_vr_hmd_fov = false;
+		f32 m_vr_hud_scale = 1.f;
+		bool m_vr_hud_fixed = false;
+		f32 m_screen_stereo_scale = 1.f;
+		f32 m_vr_hud_offset_x = 0.f;
+		f32 m_vr_hud_offset_y = 0.f;
+		// Head translation for this frame, in the clip basis (right, up or down, forward):
+		// m_vr_head_units in game units for camera draws, m_vr_head_m in metres for the
+		// fixed screen-space box, which lives at a known distance.
+		mutable std::array<f32, 3> m_vr_head_units{};
+		mutable std::array<f32, 3> m_vr_head_m{};
+
+		// Head aim (profile head_aim, see update_head_aim). The headset pose as set_vr_view computed it; m_vr_rot and the
+		// head offsets above are these turned by m_aim_off, the rotation (clip basis) between the game camera and the
+		// view the headset shows: identity outside head aim. m_aim_cam: the game camera's basis at the last update.
+		std::array<f32, 9> m_vr_head_rot{};
+		std::array<f32, 3> m_vr_head_units_raw{};
+		std::array<f32, 3> m_vr_head_m_raw{};
+		mutable std::array<f32, 9> m_aim_off{1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f};
+		mutable std::array<f32, 9> m_aim_cam{};
+		mutable bool m_aim_cam_valid = false;
+		mutable bool m_aim_pending = false; // set by set_vr_view: this frame's first camera draw updates the head aim
+		mutable bool m_aim_was_active = false;
+		mutable u32 m_aim_active_frames = 0;
+		mutable std::array<f32, 2> m_aim_ref{}; // relative mode: the head-to-aim error at the press (degrees)
+		mutable std::array<f32, 2> m_aim_turned{}; // degrees the game camera turned (+ right, + up) while driven since the press
+		mutable std::array<f32, 2> m_aim_direct{}; // head_aim.direct: degrees sent to turn the game camera since the press (+ right, + up)
+		mutable std::array<f32, 2> m_aim_direct_base{}; // head_aim.direct: the patch's applied totals at the press
+		mutable std::array<f32, 2> m_aim_head_ref{}; // head_aim.direct, relative mode: the head angles the aim is measured from
+		mutable std::array<f32, 2> m_aim_bias{}; // head_aim.direct, gaze mode: learned correction onto the head's centre
+		mutable std::array<f32, 2> m_aim_head_last{};
+		mutable std::array<s32, 2> m_aim_votes{}; // stick direction check: + the camera moved the way the stick pushed
+		mutable u64 m_aim_last_us = 0;
+		void update_head_aim(const title_profile& profile, const f32 (&game)[4][4]) const;
+		void apply_head_aim_offset() const;
+		void write_head_aim_direct(const title_profile::head_aim_rule& rule, bool driving) const;
+		f32 m_vr_hud_depth = 0.f;         // metres
+		f32 m_vr_hud_parallax = 0.f;      // ipd / (2 * depth): per-eye view-space x shift at unit forward distance
+		f32 m_vr_eye_fov[2][4]{};         // rendered
+		f32 m_vr_eye_fov_visible[2][4]{}; // shown by the headset
+		// Projection x/y scales relative to w, from the latest rigid camera block.
+		mutable f32 m_vr_proj_x = 0.f;
+		mutable f32 m_vr_proj_y = 0.f;
+		mutable bool m_vr_proj_valid = false;
+		// This frame's projections as first measured, with how many rigid blocks measured each (cleared with each new
+		// pose), and the one most blocks measured last frame. A block's scale read from its matrix differs in the last bits
+		// from object to object, and a non-rigid block (an object scaled unevenly) used to take whatever the draw before it
+		// measured: Uncharted draws each object twice with depth EQUAL (depth pass, then normal pass), its frames mix two
+		// projections 0.5 % apart, and the two draws of one object, remapped with different numbers, failed the test in
+		// patches (grey holes that came and went with the view). A measurement within 2e-4 of one this frame takes that one
+		// (set_vr_projection); a non-rigid block takes last frame's dominant one (apply_vr_rotation): both deterministic.
+		mutable std::vector<std::pair<std::array<f32, 2>, u32>> m_vr_proj_frame;
+		mutable std::array<f32, 2> m_vr_proj_dominant{};
+		// The projection each game block used this frame (keyed by a hash of its 16 words): its later draws use the same.
+		// Open addressing, entries of older frames are free (m_vr_proj_pin_frame counts frames).
+		struct vr_proj_pin
+		{
+			u64 key = 0;
+			u32 frame = 0;
+			f32 x = 0.f, y = 0.f;
+		};
+		mutable std::array<vr_proj_pin, 8192> m_vr_proj_pins{};
+		mutable u32 m_vr_proj_pin_frame = 1;
+		mutable bool m_vr_proj_pinned = false;
+		void set_vr_projection(f32 x, f32 y) const;
+		// A camera block scaled per object axis: its projection, into m_vr_proj_x / y (false: sheared or no camera).
+		bool solve_scaled_projection(f32* const rows[4]) const;
+		mutable bool m_vr_solve_scaled = false;
+		// The projection of the last camera draw into a view target that refreshed it (the scene camera), for the depth
+		// remap's ray scale: m_vr_proj_* follow whichever camera drew last (shadow-map, culling and volume cameras too).
+		mutable f32 m_scene_proj_x = 0.f;
+		mutable f32 m_scene_proj_y = 0.f;
+		mutable bool m_proj_refreshed = false; // apply_vr_rotation refreshed m_vr_proj_* for the current draw
+		// The latest output-aspect camera block per eye, as the game wrote it (B) and as
+		// drawn for that eye (B_eye), for pre-projected draws (see map_vr_preprojected).
+		mutable f32 m_vr_last_block[2][4][4]{};
+		mutable f32 m_vr_last_eye_block[2][4][4]{};
+		mutable bool m_vr_last_block_valid[2]{};
+		// Profile inverse_camera_programs: rewrites the draw's inverse camera block for the eye. True when it applied.
+		bool apply_inverse_camera(const title_profile& profile, void* buffer, const u16* reloc, usz reloc_size, f32 eye_sign) const;
+		// The last scene camera draw's game and eye matrices per eye (a view target, not a depth_remap_programs volume):
+		// the depth remap of a remap pass drawn through its own volume matrix is built from these.
+		mutable f32 m_scene_game_block[2][4][4]{};
+		mutable f32 m_scene_eye_block[2][4][4]{};
+		mutable bool m_scene_block_valid[2]{};
+		mutable s32 m_remap_scene_eye = -1; // the eye whose scene matrices the current draw's depth remap uses (-1: its own)
+		// Profile camera_block_cache: per eye, the inputs (key) and outputs of the last plain scene-camera draw.
+		struct eye_block_cache
+		{
+			bool valid = false;
+			std::array<u32, 56> key{};
+			f32 rows[4][4]{};
+			f32 cam[3]{};
+			f32 proj_x = 0.f;
+			f32 proj_y = 0.f;
+			bool proj_refreshed = false;
+			std::array<f32, 3> camera_right{};
+			bool camera_right_valid = false;
+		};
+		mutable eye_block_cache m_eye_block_cache[2];
+		// camera_block_cache fast path: where the previous stored draw's block and camera position were in the
+		// constants of this program, so the next draw's key is built from the raw words without binding the block.
+		struct eye_fast_entry
+		{
+			bool valid = false;
+			const u16* reloc = nullptr;
+			usz reloc_size = 0;
+			const void* direct_ids = nullptr;
+			u32 base = 0;
+			u32 row_off[4]{};
+			u32 cam_off = umax;
+			bool transposed = false;
+		};
+		mutable eye_fast_entry m_eye_fast[2];
+		mutable u32 m_eye_fast_hits = 0, m_eye_fast_misses = 0;
+		void store_eye_block(f32 eye_sign, const f32 (&game)[4][4], f32* const rows[4]) const;
+		// The draw's depth remap matrix (see depth_remap_matrix), from its camera block as the game wrote it and as drawn for the eye.
+		mutable f32 m_depth_remap[4][4]{};
+		mutable bool m_depth_remap_valid = false;
+		void store_depth_remap(const f32 (&game)[4][4], f32* const rows[4]) const;
+		void finish_eye_block(const title_profile& profile, void* buffer, const u16* reloc, usz reloc_size, f32 eye_sign,
+			bool output_aspect_match, bool remap_volume, const f32 (&game)[4][4], f32* const rows[4]) const;
+		void apply_linked_camera_blocks(const title_profile& profile, void* buffer, const u16* reloc, usz reloc_size,
+			const f32 (&game)[4][4], f32* const rows[4]) const;
+
+		// Rotation-invariance audit, RPCS3_VR_AUDIT=<degrees> (desktop only, no
+		// headset): both eyes share one eye position and the right eye is yawed by
+		// that angle. Under a pure rotation no world point changes colour, only
+		// position, by a known homography, so warping the left eye by it must
+		// reproduce the right; whatever does not was derived from camera
+		// orientation the renderer leaves untransformed. tools/rotation_audit.py.
+		f32 m_audit_yaw_deg = 0.f;
+		std::array<f32, 9> m_audit_rot{};
+		mutable bool m_audit_logged = false;
+		// RPCS3_VR_AUDIT_FOV=<tan>: also remap both audit eyes onto a symmetric
+		// frustum of that half-angle tangent, exercising the headset FOV remap.
+		f32 m_audit_fov_tan = 0.f;
+
+		// keep_viewport: the draw keeps its viewport (an off-aspect target sampled at screen position).
+		void remap_to_eye_fov(f32* const rows[4], const f32* tangents, f32 A, f32 B, bool keep_viewport = false) const;
+		// Undo the draw's viewport scale/offset where they differ from the render
+		// target's (ICO sets a 1360x768 viewport on a 1216x688 target), so clip space
+		// lands on the target exactly as the headset frustum mapping assumes.
+		void undo_viewport(f32* const rows[4], bool displayed_region = false, bool inverse = false) const;
+
+	public:
+		// The HUD-box mapping as a clip-space matrix (row-vector: clip' = clip * m) for a
+		// draw of the profile's passthrough HUD. False unless the headset view is active.
+		bool map_vr_passthrough_hud(f32 m[4][4], f32 eye_sign, f32 aspect) const;
+		// For a draw of a profile pre-projected program: the clip-space matrix
+		// (row-vector) taking the game's clip space to this eye's, B^-1 * B_eye of the
+		// latest camera draw. False when the program is not listed or no camera draw
+		// was transformed yet.
+		bool map_vr_preprojected(f32 m[4][4], f32 eye_sign, u64 program_hash) const;
+
+	private:
+		bool m_have_xform = false;
+		bool m_require_cam = false;
+		bool m_column_vectors = false; // layout=columns (probe only; profiles set their own)
+
+		// One-frame classifier report, logged on the first full frame after arming.
+		mutable atomic_t<u32> m_stat_perturbed{0};
+		mutable atomic_t<u32> m_stat_rejected_aspect{0};
+		mutable atomic_t<u32> m_stat_rejected_no_perspective{0};
+		bool m_report_pending = false;
+
+		// Raw single-component probe
+		bool m_have_raw = false;
+		u32 m_raw_slot = 0;
+		u32 m_raw_comp = 0;
+		f32 m_raw_add = 0.f;
+	};
+} // namespace rsx::vr
+
+namespace vk
+{
+	class event;
+	// VR fork, vk::cached_texture_section::imp_flush before waiting for the GPU (VKGSRenderVR.cpp): true when the section
+	// is one of the profile's late_readback_sections and its copy (fence) is still pending; the write to guest memory is
+	// queued for when the fence is set.
+	bool vr_late_readback(const event* fence, u32 start, u32 length);
+	// Writes the queued late readbacks whose copies have landed (RSX thread, each flip).
+	void vr_complete_late_readbacks();
+	// VR fork, vk::texture_cache::on_frame_end: the temporary image pool's memory limit (upstream: 256 MB).
+	u64 vr_cached_image_pool_limit(u64 upstream_limit);
+	// VR fork, vk::texture_cache::on_frame_end: the temporary image pool's image count limit (upstream: 256; x4 with
+	// the profile's image_pool_mb while stereo renders).
+	usz vr_cached_image_pool_count(usz upstream_count);
+}

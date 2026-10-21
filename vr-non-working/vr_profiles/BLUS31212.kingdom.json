@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "title_id": "BLUS31212",
+  "app_version": "01.00",
+  "name": "Kingdom Hearts Final Mix (Kingdom Hearts HD 1.5 ReMIX)",
+  "max_fps": 0,
+  "default_fps": 0,
+  "game_vblank_frames_f32": ["0x20d102c"],
+  "video_vblank_rate": 60,
+
+  "matrix_layout": "column_vectors",
+  "camera_blocks": [256],
+  "camera_palette": [260, 444],
+  "camera_slots_read_directly": true,
+  "view_y_down": true,
+  "require_rigid_camera": true,
+  "output_aspect_tolerance": 0.02,
+
+  "camera_position": {
+    "eye_baseline": 6.4
+  },
+
+  "stereo": {
+    "formula": "clip_x_shear",
+    "per_eye_separation": 0.0157948,
+    "convergence": 51.2,
+    "eye_offset": "baseline_per_w"
+  },
+
+  "screen_space": {
+    "passthrough_hud": true,
+    "frames_without_3d_as_screen": true,
+    "hud_programs": ["b49181469f73967f", "16ac04cbcbe66dac"],
+    "preprojected_programs": ["b7585fdcc1fb5ad9"],
+    "screen_frame_draws": [{ "program": "16ac04cbcbe66dac", "texture": "1280x720" }]
+  }
+}

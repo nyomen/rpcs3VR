@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "title_id": "BLUS30182",
+  "app_version": "01.00",
+  "name": "Pure",
+  "max_fps": 0,
+  "default_fps": 0,
+
+  "matrix_layout": "column_vectors",
+  "camera_blocks": [26, 39],
+  "require_rigid_camera": true,
+  "game_refresh_rate_f32": ["[0x1050300]+0x14"],
+  "output_aspect_tolerance": 0.02,
+
+  "camera_position": {
+    "slot": 18,
+    "eye_baseline": 0.064
+  },
+
+  "stereo": {
+    "formula": "clip_x_shear",
+    "per_eye_separation": 0.016,
+    "convergence": 2.6
+  },
+
+  "screen_space": {
+    "frames_without_3d_as_screen": false,
+    "orthographic_block": 256
+  }
+}

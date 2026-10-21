@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "title_id": "BLUS30721",
+  "app_version": "01.00",
+  "name": "ASURA'S WRATH",
+  "max_fps": 0,
+  "default_fps": 0,
+  "vblanks_per_frame": 2,
+
+  "matrix_layout": "row_vectors",
+  "camera_blocks": [0],
+  "camera_slots_read_directly": true,
+  "game_camera_aspects": [1.7647],
+  "output_aspect_tolerance": 0.02,
+  "depth_remap_programs": ["07d7202eb4af1d79"],
+
+  "camera_position": {
+    "slot": 4,
+    "eye_baseline": 3.998
+  },
+
+  "stereo": {
+    "formula": "clip_x_shear",
+    "per_eye_separation": 0.0347222,
+    "convergence": 127.936,
+    "eye_offset": "baseline"
+  },
+
+  "screen_space": {
+    "orthographic_block": 200,
+    "hud_skips_passes": true,
+    "screen_frame_draws": [ { "program": "487364b5ccf9cbc2", "texture": "1280x720" } ]
+  },
+
+  "hidden_draws": [
+    { "name": "Cinematic letterbox bars", "program": "fc13d36fbccec49a", "texture": "0x0", "hidden": true }
+  ]
+}

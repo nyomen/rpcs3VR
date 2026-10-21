@@ -1,0 +1,1118 @@
+#include "stdafx.h"
+#include "VKMultiviewVR.h"
+#include "VKFrameGen.h"
+
+#include "VKHelpers.h"
+#include "VKPipelineCompiler.h" // vr_interpreter_pipeline_state: pipeline_props
+#include "VKProgramPipeline.h"
+#include "vkutils/descriptors.h"
+#include "vkutils/device.h"
+#include "vkutils/instance.h"
+#include "vkutils/query_pool.hpp"
+#include "VKQueryPool.h"
+#include "VKRenderPass.h"
+#include "VKRenderTargets.h"
+#include "vkutils/image.h"
+
+#include "Emu/RSX/Program/GLSLTypes.h"
+#include "Emu/RSX/Program/ShaderInterpreter.h"
+#include "Emu/RSX/Program/ShaderParam.h"
+#include "Utilities/StrFmt.h"
+#include "Utilities/stack_trace.h"
+#include "Emu/Cell/timers.hpp"
+#include "Emu/RSX/gcm_enums.h" // RSX_SHADER_CONTROL_INSTANCED_CONSTANTS
+#include "../Capture/rsx_camera_probe.h" // profile depth_remap_ray_texcoord, depth_remap_xyw
+
+#include <bit>
+#include <type_traits>
+
+// VR fork: multiview stereo, the bodies of the hooks in upstream's Vulkan files (see VKMultiviewVR.h), and the
+// multiview members of upstream classes (image_view::as_array, the query pool's pairs), defined here so that
+// the upstream files carry only their declarations.
+
+static_assert(std::is_same_v<std::underlying_type_t<program_common::interpreter::compiler_option>, u32>,
+	"VR fork: the interpreter's compiler options grew past 32 bits; move vk::COMPILER_OPT_VR_MULTIVIEW above them");
+
+namespace
+{
+	// Merge guards. The multiview variants depend on upstream GLSL by its text: the _VR_MULTIVIEW blocks at the
+	// end of RSXFragmentTextureOps.glsl and RSXFragmentTextureDepthConversion.glsl redefine the macros below with
+	// a layer coordinate (copies of upstream's with the layer added), and the interpreter variants patch the call
+	// sites below. A merge from upstream that changes one of them stops the build here instead of leaving the VR
+	// copy behind: update the copy (or the patch in vr_insert_interpreter_*) to match, then the text here.
+	constexpr std::string_view upstream_texture_ops =
+#include "Emu/RSX/Program/GLSLSnippets/RSXProg/RSXFragmentTextureOps.glsl"
+		;
+	constexpr std::string_view upstream_depth_conversion =
+#include "Emu/RSX/Program/GLSLSnippets/RSXProg/RSXFragmentTextureDepthConversion.glsl"
+		;
+	constexpr std::string_view upstream_vertex_interpreter =
+#include "Emu/RSX/Program/GLSLInterpreter/VertexInterpreter.glsl"
+		;
+	constexpr std::string_view upstream_fragment_interpreter =
+#include "Emu/RSX/Program/GLSLInterpreter/FragmentInterpreter.glsl"
+		;
+
+	constexpr bool has(std::string_view text, std::string_view line)
+	{
+		return text.find(line) != std::string_view::npos;
+	}
+
+	static_assert(has(upstream_texture_ops, "#define TEX2D(index, coord2) _process_texel(texture(TEX_NAME(index), COORD_SCALE2(index, coord2)), TEX_FLAGS(index))"));
+	static_assert(has(upstream_texture_ops, "#define TEX2D_BIAS(index, coord2, bias) _process_texel(texture(TEX_NAME(index), COORD_SCALE2(index, coord2), bias), TEX_FLAGS(index))"));
+	static_assert(has(upstream_texture_ops, "#define TEX2D_LOD(index, coord2, lod) _process_texel(textureLod(TEX_NAME(index), COORD_SCALE2(index, coord2), lod), TEX_FLAGS(index))"));
+	static_assert(has(upstream_texture_ops, "#define TEX2D_GRAD(index, coord2, dpdx, dpdy) _process_texel(textureGrad(TEX_NAME(index), COORD_SCALE2(index, coord2), dpdx, dpdy), TEX_FLAGS(index))"));
+	static_assert(has(upstream_texture_ops, "#define TEX2D_PROJ(index, coord4) _process_texel(texture(TEX_NAME(index), COORD_PROJ2(index, coord4.xyw)), TEX_FLAGS(index))"));
+	static_assert(has(upstream_texture_ops, "#define TEX2D_SHADOW(index, coord3) texture(TEX_NAME(index), SHADOW_COORD(index, coord3))"));
+	static_assert(has(upstream_texture_ops, "#define TEX2D_SHADOWPROJ(index, coord4) texture(TEX_NAME(index), SHADOW_COORD_PROJ(index, coord4))"));
+	static_assert(has(upstream_texture_ops, "#define TEX2D_SHADOW(index, coord3) texture(TEX_NAME(index), vec3(COORD_SCALE2(index, coord3.xy), coord3.z))"));
+	static_assert(has(upstream_texture_ops, "#define TEX2D_SHADOWPROJ(index, coord4) texture(TEX_NAME(index), COORD_PROJ3_SHADOW(index, coord4))"));
+	static_assert(has(upstream_depth_conversion, "#define ZS_READ(index, coord) vec2(texture(TEX_NAME(index), coord).r, float(texture(TEX_NAME_STENCIL(index), coord).x))"));
+	static_assert(has(upstream_depth_conversion, "#define TEX2D_Z24X8_RGBA8(index, coord2) _process_texel(convert_z24x8_to_rgba8(ZS_READ(index, COORD_SCALE2(index, coord2)), TEX_PARAM(index).remap, TEX_FLAGS(index)), TEX_FLAGS(index))"));
+	static_assert(has(upstream_vertex_interpreter, "	gl_Position = pos;"));
+	static_assert(has(upstream_fragment_interpreter, "texture(SAMPLER2D(ur0), coord.xy, bias)"));
+	static_assert(has(upstream_fragment_interpreter, "textureLod(SAMPLER2D(ur0), coord.xy, lod)"));
+} // namespace
+
+namespace vk
+{
+	// While set, new render targets get two layers (layer 1 = right eye). See VKRenderTargets.h.
+	bool g_vr_stereo_layers = false;
+
+	// ---- Render passes ----------------------------------------------------------------------------
+
+	const void* vr_renderpass_multiview_info(u32 key_view_mask)
+	{
+		// The views of one pass are spatially correlated (a hint), so the correlation mask is the view mask.
+		static constexpr u32 view_masks[4] = {0u, 0b11u, 0b01u, 0b10u};
+		static constexpr VkRenderPassMultiviewCreateInfo infos[4] =
+			{
+				{},
+				{.sType = VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO, .subpassCount = 1, .pViewMasks = &view_masks[1], .correlationMaskCount = 1, .pCorrelationMasks = &view_masks[1]},
+				{.sType = VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO, .subpassCount = 1, .pViewMasks = &view_masks[2], .correlationMaskCount = 1, .pCorrelationMasks = &view_masks[2]},
+				{.sType = VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO, .subpassCount = 1, .pViewMasks = &view_masks[3], .correlationMaskCount = 1, .pCorrelationMasks = &view_masks[3]},
+			};
+
+		const u32 index = key_view_mask & 3;
+		return index ? &infos[index] : nullptr;
+	}
+
+	// ---- Images -----------------------------------------------------------------------------------
+
+	// Render-target reloads from guest memory, and atlases and mip chains built from render-target sections: the
+	// memory load writes layer 0, and layer 1 takes a copy (before the sections write each eye's pixels; left
+	// alone, layer 1 kept whatever the pooled image last held: Kingdom Hearts II's hair flickered in the right eye).
+	void vr_copy_left_to_right_layer(vk::command_buffer& cmd, vk::image* image, u8 mipmaps)
+	{
+		if (!image->stereo_layers || image->layers() < 2)
+		{
+			return;
+		}
+		const areai whole{0, 0, static_cast<s32>(image->width()), static_cast<s32>(image->height())};
+		vk::copy_image(cmd, image, image, whole, whole, {.mipmap_count = mipmaps, .src_layer = 0, .dst_layer = 1});
+	}
+
+	image_view* image_view::as_array()
+	{
+		if (info.viewType == VK_IMAGE_VIEW_TYPE_2D_ARRAY)
+		{
+			return this;
+		}
+
+		if (!m_resource)
+		{
+			return this; // a view without its image (framebuffer attachments) is never sampled
+		}
+
+		if (!m_array_view)
+		{
+			// Through the constructor that keeps the image: descriptors read the view's image for its layout and id.
+			VkImageSubresourceRange range = info.subresourceRange;
+			range.baseArrayLayer = 0;
+			range.layerCount = m_resource->layers();
+			m_array_view = std::make_unique<vk::image_view>(m_device, m_resource, info.format, VK_IMAGE_VIEW_TYPE_2D_ARRAY, info.components, range);
+		}
+
+		return m_array_view.get();
+	}
+
+	// ---- Occlusion queries: a query begun in a two-view pass takes two consecutive slots -------------
+
+	u32 query_pool_manager::allocate_query_pair(vk::command_buffer& cmd)
+	{
+		if (m_pool_lifetime_counter < 2)
+		{
+			if (vk::is_renderpass_open(cmd))
+			{
+				vk::end_renderpass(cmd);
+			}
+
+			// A pool holds one reference per slot until the slot is freed; a slot this pool will not hand out any
+			// more keeps it alive for good (the discard pile grew: "Are we leaking??"). Drop those first.
+			for (; m_pool_lifetime_counter && m_current_query_pool; --m_pool_lifetime_counter)
+			{
+				m_current_query_pool->release();
+			}
+
+			reallocate_pool(cmd);
+		}
+
+		// Two consecutive free slots at the front of the list: the list starts in order, a pair is freed as a
+		// pair (free_query), and a lone slot in the way is rotated to the back. No allocation: this runs for
+		// every query segment (a pass end ends the open pair; the next draw begins another).
+		for (usz tries = 0, count = m_available_slots.size(); tries < count && m_available_slots.size() >= 2; ++tries)
+		{
+			const u32 first = m_available_slots.front();
+			m_available_slots.pop_front();
+			if (m_available_slots.front() == first + 1)
+			{
+				m_available_slots.pop_front();
+				m_pool_lifetime_counter -= 2;
+				return first;
+			}
+			m_available_slots.push_back(first);
+		}
+
+		return ~0u;
+	}
+
+	void query_pool_manager::begin_query_pair(vk::command_buffer& cmd, u32 index)
+	{
+		// The head is begun as a single query (one begin covers both views' slots, index and index + 1);
+		// the second slot only records the pool its result is read from, and is freed with the head.
+		ensure(query_slot_status[index + 1].active == false);
+		begin_query(cmd, index);
+		query_slot_status[index].pair_head = true;
+		query_slot_status[index + 1].pool = m_current_query_pool.get();
+		query_slot_status[index + 1].active = true;
+	}
+
+	// ---- Shader generation ------------------------------------------------------------------------
+
+	std::string_view vr_sampler_type(std::string_view type, u32 ctrl)
+	{
+		if (!(ctrl & RSX_SHADER_CONTROL_VR_MULTIVIEW))
+		{
+			return type;
+		}
+
+		// The layer is the eye (gl_ViewIndex); a one-layer texture clamps to layer 0.
+		if (type == "sampler2D")
+			return "sampler2DArray";
+		if (type == "sampler2DMS")
+			return "sampler2DMSArray";
+		if (type == "sampler2DShadow")
+			return "sampler2DArrayShadow";
+		return type;
+	}
+
+	void vr_set_sampler_type(std::string& type, u32 ctrl)
+	{
+		if (const std::string_view array_type = vr_sampler_type(type, ctrl); array_type.data() != type.data())
+		{
+			type = array_type;
+		}
+	}
+
+	void vr_insert_fragment_extensions(std::ostream& OS, u32 ctrl)
+	{
+		if (ctrl & RSX_SHADER_CONTROL_VR_MULTIVIEW)
+		{
+			// gl_ViewIndex selects the eye's layer of every 2D texture
+			OS << "#extension GL_EXT_multiview: require\n";
+		}
+	}
+
+	void vr_insert_fragment_defines(std::ostream& OS, ::glsl::shader_properties& props, u32 ctrl)
+	{
+		props.vr_multiview = !!(ctrl & RSX_SHADER_CONTROL_VR_MULTIVIEW);
+		if (props.vr_multiview)
+		{
+			OS << "#define _VR_MULTIVIEW\n\n";
+		}
+	}
+
+	std::string_view vr_vertex_function(FUNCTION f, u32 ctrl)
+	{
+		if (!(ctrl & RSX_SHADER_CONTROL_VR_MULTIVIEW))
+		{
+			return {};
+		}
+
+		// 2D vertex textures are array samplers; the layer is the eye
+		switch (f)
+		{
+		case FUNCTION::VERTEX_TEXTURE_FETCH2D:
+			return "textureLod($t, vec3($0.xy, float(gl_ViewIndex)), 0)";
+		case FUNCTION::VERTEX_TEXTURE_FETCH2DMS:
+			return "texelFetch($t, ivec3(ivec2($0.xy * textureSize($t).xy), gl_ViewIndex), 0)";
+		default:
+			return {};
+		}
+	}
+
+	void vr_insert_vertex_extensions(std::ostream& OS, u32 ctrl, bool viewport_index)
+	{
+		if (!(ctrl & RSX_SHADER_CONTROL_VR_MULTIVIEW))
+		{
+			return;
+		}
+
+		// Both eyes in one draw; each view reads its own draw parameters (and scissor)
+		OS << "#extension GL_EXT_multiview : require\n";
+		if (viewport_index)
+		{
+			OS << "#extension GL_ARB_shader_viewport_layer_array : require\n";
+		}
+		OS << "\n";
+	}
+
+	void vr_insert_vertex_draw_params(std::ostream& OS, u32 ctrl)
+	{
+		if (ctrl & RSX_SHADER_CONTROL_VR_MULTIVIEW)
+		{
+			// The two views' entries are adjacent (left, right): each view reads its own.
+			OS << "#undef get_draw_params\n"
+				  "#define get_draw_params() draw_parameters[draw_parameters_offset + uint(gl_ViewIndex)]\n\n";
+		}
+	}
+
+	void vr_insert_vertex_main_end(std::ostream& OS, u32 ctrl, bool viewport_index)
+	{
+		if ((ctrl & RSX_SHADER_CONTROL_VR_MULTIVIEW) && viewport_index)
+		{
+			// Each view clips to its own scissor (the HUD box differs per eye)
+			OS << "	gl_ViewportIndex = int(gl_ViewIndex);\n\n";
+		}
+	}
+
+	// The varyings after the RSX's (locations 0-15): exact depth, then the depth remap's 6 (17 to 22)
+	static constexpr int vr_exact_depth_location = 16;
+	static constexpr int vr_depth_remap_location = 17;
+	static constexpr int vr_frag_rows_location = 26; // after DLSS's 23 to 25
+
+	void vr_insert_exact_depth_vertex_output(std::ostream& OS, u32 ctrl)
+	{
+		if (ctrl & RSX_SHADER_CONTROL_VR_EXACT_DEPTH)
+		{
+			OS << "layout(location=" << vr_exact_depth_location << ") out vec2 vr_exact_depth;\n";
+		}
+	}
+
+	void vr_insert_exact_depth_vertex_end(std::ostream& OS, u32 ctrl)
+	{
+		if (!(ctrl & RSX_SHADER_CONTROL_VR_EXACT_DEPTH))
+		{
+			return;
+		}
+		// The game's window depth at this vertex, weighted by the game's own w (vr_pre_xform: the position before the
+		// viewport or HUD-box matrix). The rasterizer interpolates varyings in the space gl_Position spans, a linear map
+		// of the game's clip space, so x / y is the game's depth at each pixel exactly. Unrestricted depth range: the
+		// viewport maps the zclip output [0, 1] onto [z_near, z_far].
+		const bool unrestricted = vk::get_current_renderer()->get_unrestricted_depth_range_support();
+		OS << "	{\n";
+		OS << "		const float vr_d = gl_Position.w != 0. ? gl_Position.z / gl_Position.w : 0.;\n";
+		OS << (unrestricted ? "		vr_exact_depth = vec2((z_near + vr_d * (z_far - z_near)) * vr_pre_xform.w, vr_pre_xform.w);\n"
+		                    : "		vr_exact_depth = vec2(vr_d * vr_pre_xform.w, vr_pre_xform.w);\n");
+		OS << "	}\n";
+	}
+
+	void vr_insert_depth_remap_vertex_output(std::ostream& OS, u32 ctrl)
+	{
+		if (ctrl & (RSX_SHADER_CONTROL_VR_DEPTH_REMAP | RSX_SHADER_CONTROL_VR_DEPTH_REMAP_SCREEN))
+		{
+			OS << "layout(location=" << vr_depth_remap_location << ") flat out vec4 vr_depth_remap[" << vr_depth_remap_matrix_vec4s(ctrl) << "];\n";
+		}
+		if (ctrl & RSX_SHADER_CONTROL_VR_FRAG_ROWS)
+		{
+			OS << "layout(location=" << vr_frag_rows_location << ") flat out vec4 vr_frag_rows[4];\n";
+		}
+		vk::dlss_insert_vertex_output(OS, ctrl); // DLSS test: motion
+	}
+
+	void vr_insert_depth_remap_vertex_end(std::ostream& OS, u32 ctrl, u32 constant_slots)
+	{
+		// DLSS test: motion and jitter (last: jitter moves the final position). Its block follows the depth remap's.
+		const u32 block_vec4s = vr_depth_remap_vec4s(ctrl);
+		const u32 remap_vec4s = vr_depth_remap_matrix_vec4s(ctrl);
+		vk::dlss_insert_vertex_end(OS, ctrl, constant_slots + block_vec4s, constant_slots != 0);
+		if (ctrl & RSX_SHADER_CONTROL_VR_FRAG_ROWS)
+		{
+			// Profile fragment_camera_rows: this eye's rows, after the depth remap's vec4s (zeros without constants: the
+			// fragment program then keeps the game's own).
+			if (ctrl & RSX_SHADER_CONTROL_INSTANCED_CONSTANTS)
+				OS << "	vr_frag_rows = vec4[4](vec4(0.), vec4(0.), vec4(0.), vec4(0.));\n";
+			else
+				OS << "	for (uint vr_i = 0; vr_i < 4u; ++vr_i) vr_frag_rows[vr_i] = vc[get_draw_params().xform_constants_offset + " << constant_slots + remap_vec4s << "u + vr_i];\n";
+		}
+		if (!(ctrl & (RSX_SHADER_CONTROL_VR_DEPTH_REMAP | RSX_SHADER_CONTROL_VR_DEPTH_REMAP_SCREEN)))
+		{
+			return;
+		}
+		// Instanced constants come from another buffer, without the matrix: the identity (the game's own reconstruction).
+		if (ctrl & RSX_SHADER_CONTROL_INSTANCED_CONSTANTS)
+		{
+			OS << "	vr_depth_remap = vec4[" << remap_vec4s << "](vec4(1., 0., 0., 0.), vec4(0., 1., 0., 0.), vec4(0., 0., 1., 0.), vec4(0., 0., 0., 1.), vec4(0.)" <<
+				(remap_vec4s > 5 ? ", vec4(-1e9, -1e9, 1e9, 1e9)" : "") << ");\n";
+			return;
+		}
+		OS << "	for (uint vr_i = 0; vr_i < " << remap_vec4s << "u; ++vr_i) vr_depth_remap[vr_i] = vc[get_draw_params().xform_constants_offset + " << constant_slots << "u + vr_i];\n";
+	}
+
+	void vr_insert_depth_remap_fragment_input(std::ostream& OS, u32 ctrl, u32 mrt_count, const RSXFragmentProgram& prog)
+	{
+		if (ctrl & (RSX_SHADER_CONTROL_VR_DEPTH_REMAP | RSX_SHADER_CONTROL_VR_DEPTH_REMAP_SCREEN))
+		{
+			OS << "layout(location=" << vr_depth_remap_location << ") flat in vec4 vr_depth_remap[" << vr_depth_remap_matrix_vec4s(ctrl) << "]; // VR fork\n";
+		}
+		if (ctrl & RSX_SHADER_CONTROL_VR_FRAG_ROWS)
+		{
+			// Profile fragment_camera_rows: the rule's three constants are read from the eye's rows (all zero: none were
+			// written, the game's own are kept).
+			const usz hash = prog.ucode_hash ? prog.ucode_hash : program_hash_util::fragment_program_utils::get_fragment_program_ucode_hash(prog);
+			if (const auto* rule = rsx::vr::fragment_camera_rows_rule(0, hash))
+			{
+				OS << "layout(location=" << vr_frag_rows_location << ") flat in vec4 vr_frag_rows[4]; // VR fork\n";
+				OS << "vec4 vr_fetch_constant(const in uint x)\n{\n";
+				OS << "	const bool vr_rows = dot(abs(vr_frag_rows[0]) + abs(vr_frag_rows[1]) + abs(vr_frag_rows[2]) + abs(vr_frag_rows[3]), vec4(1.)) != 0.;\n";
+				if (rule->eye_ray != umax)
+				{
+					OS << "	if (vr_rows && x == " << rule->eye_ray << "u) return vr_frag_rows[0];\n";
+					OS << "	if (vr_rows && x == " << rule->eye_view_vector << "u) return vr_frag_rows[1];\n";
+				}
+				for (u32 i = 0; i < (rule->has_rows ? 3u : 0u); ++i)
+				{
+					OS << "	if (vr_rows && x == " << rule->rows[i] << "u) return vr_frag_rows[" << i << "];\n";
+				}
+				if (rule->eye_position != umax)
+				{
+					OS << "	if (vr_rows && x == " << rule->eye_position << "u) return vr_frag_rows[3];\n";
+				}
+				OS << "	return fc[x + _fs_constants_offset];\n}\n";
+				OS << "#undef _fetch_constant\n#define _fetch_constant(x) vr_fetch_constant(uint(x))\n";
+			}
+		}
+		vk::dlss_insert_fragment_input(OS, ctrl);              // DLSS test: motion
+		vk::dlss_insert_fragment_output(OS, ctrl, mrt_count);  // the motion attachment follows the colour attachments
+	}
+
+	void vr_insert_depth_remap_fragment_start(std::ostream& OS, u32 ctrl, u32 in_register_mask, u32 depth_mask)
+	{
+		const u32 tc_mask = (in_register_mask >> 4) & 0x3ff; // FragmentProgramDecompiler's in_tc0 (bit 4) to in_tc9
+		const auto* profile = rsx::vr::camera_probe::get().profile();
+		// Profile depth_remap_packed_unit: the depth is a colour copy at that unit (plain remap passes only).
+		const s32 packed = (profile && (ctrl & RSX_SHADER_CONTROL_VR_DEPTH_REMAP) && !(ctrl & RSX_SHADER_CONTROL_VR_DEPTH_REMAP_SCREEN)) ? profile->depth_remap_packed_unit : -1;
+		if (!(ctrl & (RSX_SHADER_CONTROL_VR_DEPTH_REMAP | RSX_SHADER_CONTROL_VR_DEPTH_REMAP_SCREEN)) || !tc_mask || (!depth_mask && packed < 0))
+		{
+			return;
+		}
+		const std::string tc = "tc" + std::to_string(std::countr_zero(tc_mask));
+		const std::string unit = std::to_string(packed >= 0 ? static_cast<u32>(packed) : std::countr_zero(depth_mask));
+		if ((ctrl & RSX_SHADER_CONTROL_VR_DEPTH_REMAP_SCREEN) && !(ctrl & RSX_SHADER_CONTROL_VR_DEPTH_REMAP))
+		{
+			// Game-view depth variant (profile depth_remap_screen.depth_programs): the pass builds a depth pyramid in the
+			// game's screen space that the game reads back (the min and max depth of each light tile). Each depth read at
+			// a game uv takes the eye's depth in that direction instead (the game point at the far end of the depth range
+			// taken to the eye: the head rotation undone, the eye's offset negligible there) and converts it to the game
+			// camera's depth, so the tiles' ranges describe what the game camera would see. Directions outside the eye's
+			// view read its edge.
+			OS << "\n	// VR fork: depth remap, game-view depth variant (profile depth_remap_screen.depth_programs)\n";
+			OS << "	const mat4 vr_gv_m = mat4(vr_depth_remap[0], vr_depth_remap[1], vr_depth_remap[2], vr_depth_remap[3]);\n";
+			OS << "	const mat4 vr_gv_minv = inverse(vr_gv_m);\n";
+			OS << "	const vec2 vr_gv_size = vec2(textureSize(tex" << unit << ", 0).xy);\n";
+			OS << "#define VR_GV_E(uv) (vr_gv_minv * vec4((uv).x * 2. - 1., 1. - (uv).y * 2., 0.999, 1.))\n";
+			OS << "#define VR_GV_NDC(uv) (VR_GV_E(uv).xy / (VR_GV_E(uv).w > 0. ? VR_GV_E(uv).w : 1e-6))\n";
+			OS << "#ifdef _VR_MULTIVIEW\n";
+			OS << "#define VR_GV_PX(uv) ivec3(ivec2(clamp(VR_GV_NDC(uv) * vec2(0.5, -0.5) + 0.5, 0., 0.9999) * vr_gv_size), gl_ViewIndex)\n";
+			OS << "#else\n";
+			OS << "#define VR_GV_PX(uv) ivec2(clamp(VR_GV_NDC(uv) * vec2(0.5, -0.5) + 0.5, 0., 0.9999) * vr_gv_size)\n";
+			OS << "#endif\n";
+			OS << "#define VR_GV_G(uv) (vr_gv_m * vec4(VR_GV_NDC(uv), texelFetch(tex" << unit << ", VR_GV_PX(uv), 0).r, 1.))\n";
+			OS << "#define VR_GV_ZS(uv) vec2(clamp(VR_GV_G(uv).z / (VR_GV_G(uv).w != 0. ? VR_GV_G(uv).w : 1.), 0., 1.), float(texelFetch(tex" << unit << "_stencil, VR_GV_PX(uv), 0).x))\n";
+			OS << "#undef TEX2D_Z24X8_RGBA8\n";
+			OS << "#ifdef _VR_MULTIVIEW\n";
+			OS << "#define TEX2D_Z24X8_RGBA8(index, coord2) _process_texel(convert_z24x8_to_rgba8((index == " << unit << ") ? VR_GV_ZS(coord2) : ZS_READ2D(index, COORD_SCALE2(index, coord2)), TEX_PARAM(index).remap, TEX_FLAGS(index)), TEX_FLAGS(index))\n";
+			OS << "#else\n";
+			OS << "#define TEX2D_Z24X8_RGBA8(index, coord2) _process_texel(convert_z24x8_to_rgba8((index == " << unit << ") ? VR_GV_ZS(coord2) : ZS_READ(index, COORD_SCALE2(index, coord2)), TEX_PARAM(index).remap, TEX_FLAGS(index)), TEX_FLAGS(index))\n";
+			OS << "#endif\n\n";
+			return;
+		}
+		if (ctrl & RSX_SHADER_CONTROL_VR_DEPTH_REMAP_SCREEN)
+		{
+			// Screen-tile variant (profile depth_remap_screen): a pass drawn as one quad per screen tile of the game's
+			// view, with the tile's lights as constants (Sonic's cave lights). The eye's position comes from the pixel
+			// itself (the quad was moved into the eye through the head rotation, so its texture coordinates no longer
+			// name the pixel): its depth goes to the game camera, the ray texture coordinate becomes the game camera's
+			// ray to that point (as the ray variant below) and the uv one the eye pixel's, for the other G-buffer reads.
+			// vr_depth_remap[5] is the tile's rectangle in the game's NDC (border sides open): a point the game sees in
+			// another tile takes that tile's lights there, so it is dropped here.
+			const s32 ray_tc = profile ? profile->depth_remap_screen_ray_texcoord : -1;
+			const s32 uv_tc = profile ? profile->depth_remap_screen_uv_texcoord : -1;
+			const bool has_ray = ray_tc >= 0 && (tc_mask >> ray_tc & 1);
+			const bool has_uv = uv_tc >= 0 && (tc_mask >> uv_tc & 1);
+			OS << "\n	// VR fork: depth remap, screen-tile variant (profile depth_remap_screen)\n";
+			OS << "	vec4 vr_remap_ray;\n";
+			OS << "	vec4 vr_remap_uv;\n";
+			OS << "	vec2 vr_remap_zs;\n";
+			OS << "	{\n";
+			OS << "		const vec2 vr_size = max(vr_depth_remap[4].zw, vec2(1.));\n";
+			OS << "		const vec2 vr_uv = gl_FragCoord.xy / vr_size;\n";
+			OS << "		const vec2 vr_scale = vec2(textureSize(tex" << unit << ", 0).xy) / vr_size;\n";
+			OS << "#ifdef _VR_MULTIVIEW\n";
+			OS << "		const ivec3 vr_px = ivec3(ivec2(gl_FragCoord.xy * vr_scale), gl_ViewIndex);\n";
+			OS << "#else\n";
+			OS << "		const ivec2 vr_px = ivec2(gl_FragCoord.xy * vr_scale);\n";
+			OS << "#endif\n";
+			OS << "		const vec4 vr_eye = vec4(vr_uv.x * 2. - 1., 1. - vr_uv.y * 2., texelFetch(tex" << unit << ", vr_px, 0).r, 1.);\n";
+			OS << "		const vec4 vr_g = vr_eye.x * vr_depth_remap[0] + vr_eye.y * vr_depth_remap[1] + vr_eye.z * vr_depth_remap[2] + vr_depth_remap[3];\n";
+			OS << "		const float vr_gw = vr_g.w != 0. ? vr_g.w : 1.;\n";
+			OS << "		const vec2 vr_ndc = vr_g.xy / vr_gw;\n";
+			OS << "		if (vr_g.w <= 0. || any(lessThan(vr_ndc, vr_depth_remap[5].xy)) || any(greaterThanEqual(vr_ndc, vr_depth_remap[5].zw))) discard;\n";
+			OS << "		vr_remap_zs = vec2(clamp(vr_g.z / vr_gw, 0., 1.), float(texelFetch(tex" << unit << "_stencil, vr_px, 0).x));\n";
+			OS << "		vr_remap_ray = " << (has_ray ? "vr_depth_remap[4].x != 0. ? vec4(vr_ndc.x * vr_depth_remap[4].x, vr_ndc.y * vr_depth_remap[4].y, 1., 0.) : tc" + std::to_string(ray_tc) : std::string("vec4(0.)")) << ";\n";
+			OS << "		vr_remap_uv = " << (has_uv ? "vec4(vr_uv, tc" + std::to_string(uv_tc) + ".zw)" : std::string("vec4(vr_uv, 0., 1.)")) << ";\n";
+			OS << "	}\n";
+			if (has_ray)
+				OS << "#define tc" << ray_tc << " vr_remap_ray\n";
+			if (has_uv)
+				OS << "#define tc" << uv_tc << " vr_remap_uv\n";
+			OS << "#undef TEX2D_Z24X8_RGBA8\n";
+			OS << "#ifdef _VR_MULTIVIEW\n";
+			OS << "#define TEX2D_Z24X8_RGBA8(index, coord2) _process_texel(convert_z24x8_to_rgba8((index == " << unit << ") ? vr_remap_zs : ZS_READ2D(index, COORD_SCALE2(index, coord2)), TEX_PARAM(index).remap, TEX_FLAGS(index)), TEX_FLAGS(index))\n";
+			OS << "#else\n";
+			OS << "#define TEX2D_Z24X8_RGBA8(index, coord2) _process_texel(convert_z24x8_to_rgba8((index == " << unit << ") ? vr_remap_zs : ZS_READ(index, COORD_SCALE2(index, coord2)), TEX_PARAM(index).remap, TEX_FLAGS(index)), TEX_FLAGS(index))\n";
+			OS << "#endif\n\n";
+			return;
+		}
+		if (profile && !profile->depth_remap_uv && profile->depth_remap_ray_texcoord >= 0 && (tc_mask >> profile->depth_remap_ray_texcoord & 1))
+		{
+			// Ray variant (profile depth_remap_ray_texcoord): the pass rebuilds a view-space position as its view ray
+			// (a varying built with the game's view, not a camera block) scaled to the depth's view distance, with its
+			// texture coordinates from the clip position. The clip position stays the eye's (it picks the texels), the
+			// depth texel under the pixel is read at the depth texture's own size (passes drawn below its resolution)
+			// and remapped to the game camera, and the ray becomes the game camera's ray to that point: (x / A, y / B, 1)
+			// of its game NDC, the camera probe's view frame (u = (X/A, Y/B, W), see remap_to_eye_fov; only the ray's
+			// direction up to sign matters, as such passes divide by its z). Sonic & All-Stars Racing Transformed's shadow cascades.
+			const std::string ray = "tc" + std::to_string(profile->depth_remap_ray_texcoord);
+			const std::string w = profile->depth_remap_xyw ? tc + ".z" : tc + ".w";
+			OS << "\n	// VR fork: depth remap, ray variant (profile depth_remap_programs + depth_remap_ray_texcoord)\n";
+			OS << "	vec4 vr_remap_ray;\n";
+			OS << "	vec2 vr_remap_zs;\n";
+			OS << "	{\n";
+			OS << "		const vec2 vr_scale = vec2(textureSize(tex" << unit << ", 0).xy) / max(vr_depth_remap[4].zw, vec2(1.));\n";
+			OS << "#ifdef _VR_MULTIVIEW\n";
+			OS << "		const ivec3 vr_px = ivec3(ivec2(gl_FragCoord.xy * vr_scale), gl_ViewIndex);\n";
+			OS << "#else\n";
+			OS << "		const ivec2 vr_px = ivec2(gl_FragCoord.xy * vr_scale);\n";
+			OS << "#endif\n";
+			OS << "		const float vr_w = " << w << " != 0. ? " << w << " : 1.;\n";
+			OS << "		const vec4 vr_eye = vec4(" << tc << ".xy / vr_w, texelFetch(tex" << unit << ", vr_px, 0).r, 1.);\n";
+			OS << "		const vec4 vr_g = vr_eye.x * vr_depth_remap[0] + vr_eye.y * vr_depth_remap[1] + vr_eye.z * vr_depth_remap[2] + vr_depth_remap[3];\n";
+			OS << "		const float vr_gw = vr_g.w != 0. ? vr_g.w : 1.;\n";
+			OS << "		vr_remap_zs = vec2(vr_g.w != 0. ? clamp(vr_g.z / vr_g.w, 0., 1.) : vr_eye.z, float(texelFetch(tex" << unit << "_stencil, vr_px, 0).x));\n";
+			OS << "		vr_remap_ray = vr_depth_remap[4].x != 0. ? vec4(vr_g.x / vr_gw * vr_depth_remap[4].x, vr_g.y / vr_gw * vr_depth_remap[4].y, 1., 0.) : " << ray << ";\n";
+			OS << "	}\n";
+			OS << "#define " << ray << " vr_remap_ray\n";
+			OS << "#undef TEX2D_Z24X8_RGBA8\n";
+			OS << "#ifdef _VR_MULTIVIEW\n";
+			OS << "#define TEX2D_Z24X8_RGBA8(index, coord2) _process_texel(convert_z24x8_to_rgba8((index == " << unit << ") ? vr_remap_zs : ZS_READ2D(index, COORD_SCALE2(index, coord2)), TEX_PARAM(index).remap, TEX_FLAGS(index)), TEX_FLAGS(index))\n";
+			OS << "#else\n";
+			OS << "#define TEX2D_Z24X8_RGBA8(index, coord2) _process_texel(convert_z24x8_to_rgba8((index == " << unit << ") ? vr_remap_zs : ZS_READ(index, COORD_SCALE2(index, coord2)), TEX_PARAM(index).remap, TEX_FLAGS(index)), TEX_FLAGS(index))\n";
+			OS << "#endif\n\n";
+			return;
+		}
+		// The eye's (NDC x, NDC y, window depth) at this pixel, times the matrix: the game's, homogeneous. The texture
+		// coordinate holds the pass's clip position (the eye's: the camera block took the eye transform), and the
+		// depth texture is the pass's depth buffer, the size of its render target.
+		OS << "\n	// VR fork: depth remap (profile depth_remap_programs), before the program reads its position and depth\n";
+		OS << "	vec4 vr_remap_position;\n";
+		OS << "	vec2 vr_remap_zs;\n";
+		OS << "	{\n";
+		OS << "#ifdef _VR_MULTIVIEW\n";
+		OS << "		const ivec3 vr_px = ivec3(ivec2(gl_FragCoord.xy), gl_ViewIndex);\n";
+		OS << "#else\n";
+		OS << "		const ivec2 vr_px = ivec2(gl_FragCoord.xy);\n";
+		OS << "#endif\n";
+		OS << "		const float vr_w = " << tc << ".w != 0. ? " << tc << ".w : 1.;\n";
+		// The eye's depth at this pixel: the depth texture's, or (depth_remap_packed_unit) decoded from the colour copy
+		// (r * 65536 + g * 256 + b over 2^24 - 1, the bytes RPCS3's Z24-as-RGBA8 conversion put at w, x, y).
+		std::string eye_depth = "texelFetch(tex" + unit + ", vr_px, 0).r";
+		if (packed >= 0)
+		{
+			OS << "		const vec4 vr_packed = texelFetch(tex" << unit << ", vr_px, 0);\n";
+			OS << "		const float vr_packed_depth = float((uint(round(vr_packed.w * 255.)) << 16) | (uint(round(vr_packed.x * 255.)) << 8) | uint(round(vr_packed.y * 255.))) / 16777215.;\n";
+			eye_depth = "vr_packed_depth";
+		}
+		if (profile && profile->depth_remap_uv)
+		{
+			// Screen uv (y down) to NDC, remap to the game camera, and back to uv (w = 1: the program divides by it).
+			OS << "		const vec2 vr_uv = " << tc << ".xy / vr_w;\n";
+			OS << "		const vec4 vr_eye = vec4(vr_uv.x * 2. - 1., 1. - vr_uv.y * 2., " << eye_depth << ", 1.);\n";
+		}
+		else
+		{
+			OS << "		const vec4 vr_eye = vec4(" << tc << ".xy / vr_w, " << eye_depth << ", 1.);\n";
+		}
+		OS << "		vr_remap_position = vr_eye.x * vr_depth_remap[0] + vr_eye.y * vr_depth_remap[1] + vr_eye.z * vr_depth_remap[2] + vr_depth_remap[3];\n";
+		if (packed >= 0)
+		{
+			OS << "		vr_remap_zs = vec2(vr_remap_position.w != 0. ? clamp(vr_remap_position.z / vr_remap_position.w, 0., 1.) : vr_eye.z, vr_packed.z * 255.);\n";
+		}
+		else
+		{
+			OS << "		vr_remap_zs = vec2(vr_remap_position.w != 0. ? clamp(vr_remap_position.z / vr_remap_position.w, 0., 1.) : vr_eye.z, float(texelFetch(tex" << unit << "_stencil, vr_px, 0).x));\n";
+		}
+		if (profile && profile->depth_remap_uv)
+		{
+			OS << "		const vec2 vr_ndc_g = vr_remap_position.xy / (vr_remap_position.w != 0. ? vr_remap_position.w : 1.);\n";
+			if (in_register_mask & 1) // FragmentProgramDecompiler's in_wpos: move the window position by the NDC change
+			{
+				OS << "		const vec2 vr_dn = vec2(dFdx(vr_eye.x), dFdy(vr_eye.y));\n";
+				OS << "		const vec2 vr_k = vec2(abs(vr_dn.x) > 1e-12 ? dFdx(wpos.x) / vr_dn.x : 0., abs(vr_dn.y) > 1e-12 ? dFdy(wpos.y) / vr_dn.y : 0.);\n";
+				OS << "		wpos.xy += (vr_ndc_g - vr_eye.xy) * vr_k;\n";
+			}
+			OS << "		vr_remap_position = vec4((vr_ndc_g.x + 1.) * 0.5, (1. - vr_ndc_g.y) * 0.5, " << tc << ".z, 1.);\n";
+		}
+		OS << "	}\n";
+		OS << "#define " << tc << " vr_remap_position\n";
+		if (packed >= 0)
+		{
+			// The program's colour reads of the copy return the game camera's depth, encoded as the copy holds it.
+			OS << "	const uint vr_remap_v = uint(vr_remap_zs.x * 16777215.);\n";
+			OS << "	const vec4 vr_remap_packed = vec4(float((vr_remap_v >> 8) & 255u), float(vr_remap_v & 255u), vr_remap_zs.y, float((vr_remap_v >> 16) & 255u)) / 255.;\n";
+			OS << "#undef TEX2D\n";
+			OS << "#ifdef _VR_MULTIVIEW\n";
+			OS << "#define TEX2D(index, coord2) ((index == " << unit << ") ? _process_texel(vr_remap_packed, TEX_FLAGS(index)) : _process_texel(texture(TEX_NAME(index), vec3(COORD_SCALE2(index, coord2), VR_LAYER)), TEX_FLAGS(index)))\n";
+			OS << "#else\n";
+			OS << "#define TEX2D(index, coord2) ((index == " << unit << ") ? _process_texel(vr_remap_packed, TEX_FLAGS(index)) : _process_texel(texture(TEX_NAME(index), COORD_SCALE2(index, coord2)), TEX_FLAGS(index)))\n";
+			OS << "#endif\n\n";
+			return;
+		}
+		OS << "#undef TEX2D_Z24X8_RGBA8\n";
+		OS << "#ifdef _VR_MULTIVIEW\n";
+		OS << "#define TEX2D_Z24X8_RGBA8(index, coord2) _process_texel(convert_z24x8_to_rgba8((index == " << unit << ") ? vr_remap_zs : ZS_READ2D(index, COORD_SCALE2(index, coord2)), TEX_PARAM(index).remap, TEX_FLAGS(index)), TEX_FLAGS(index))\n";
+		OS << "#else\n";
+		OS << "#define TEX2D_Z24X8_RGBA8(index, coord2) _process_texel(convert_z24x8_to_rgba8((index == " << unit << ") ? vr_remap_zs : ZS_READ(index, COORD_SCALE2(index, coord2)), TEX_PARAM(index).remap, TEX_FLAGS(index)), TEX_FLAGS(index))\n";
+		OS << "#endif\n\n";
+	}
+
+	void vr_insert_exact_depth_fragment_input(std::ostream& OS, u32 ctrl)
+	{
+		if (ctrl & RSX_SHADER_CONTROL_VR_EXACT_DEPTH)
+		{
+			OS << "layout(location=" << vr_exact_depth_location << ") in vec2 vr_exact_depth;\n";
+		}
+	}
+
+	void vr_interpreter_pipeline_state(pipeline_props& props, VkPipelineViewportStateCreateInfo& vp)
+	{
+		vp.viewportCount = vp.scissorCount = (vk::get_renderpass_view_mask(props.renderpass_key) == 1) ? 2 : 1;
+		vk::dlss_interpreter_props(props);
+	}
+
+	void vr_insert_exact_depth_fragment_end(std::ostream& OS, u32 ctrl, std::array<u32, 4>& output_color_masks, u32 mrt_count)
+	{
+		if (ctrl & RSX_SHADER_CONTROL_VR_EXACT_DEPTH)
+		{
+			OS << "	gl_FragDepth = vr_exact_depth.y != 0. ? clamp(vr_exact_depth.x / vr_exact_depth.y, 0., 1.) : gl_FragCoord.z;\n\n";
+		}
+		// DLSS test: motion. Its attachment is written (validate_pipeline_properties masks the attachments a program
+		// does not write; insertOutputs has run).
+		vk::dlss_insert_fragment_end(OS, ctrl);
+		if ((ctrl & RSX_SHADER_CONTROL_DLSS_MOTION) && mrt_count < output_color_masks.size())
+		{
+			output_color_masks[mrt_count] = umax;
+		}
+	}
+
+	void vr_insert_interpreter_vertex(std::ostream& OS, const std::string& vertex_interpreter, bool viewport_index)
+	{
+		if (!viewport_index)
+		{
+			OS << vertex_interpreter;
+			return;
+		}
+
+		// Each view clips to its own scissor (the HUD box differs per eye)
+		const std::string text = fmt::replace_all(vertex_interpreter, "	gl_Position = pos;\n", "	gl_Position = pos;\n	gl_ViewportIndex = int(gl_ViewIndex);\n");
+		if (text.size() == vertex_interpreter.size())
+		{
+			// Guard for merges from upstream: without it both views would clip to the left eye's scissor.
+			rsx_log.error("VR multiview: the vertex interpreter's gl_Position write changed; update vr_insert_interpreter_vertex");
+		}
+		OS << text;
+	}
+
+	void vr_insert_interpreter_fragment_extensions(std::ostream& OS, u64 compiler_options)
+	{
+		if (compiler_options & COMPILER_OPT_VR_MULTIVIEW)
+		{
+			OS << "#extension GL_EXT_multiview : require\n\n"; // gl_ViewIndex picks the eye's layer
+		}
+	}
+
+	std::string_view vr_interpreter_sampler_type(std::string_view type, u64 compiler_options)
+	{
+		return vr_sampler_type(type, (compiler_options & COMPILER_OPT_VR_MULTIVIEW) ? RSX_SHADER_CONTROL_VR_MULTIVIEW : 0);
+	}
+
+	void vr_insert_interpreter_fragment(std::ostream& OS, const std::string& fragment_interpreter, u64 compiler_options)
+	{
+		if (!(compiler_options & COMPILER_OPT_VR_MULTIVIEW))
+		{
+			OS << fragment_interpreter;
+			return;
+		}
+
+		// 2D textures are arrays sampled at layer gl_ViewIndex
+		std::string fs_text = fragment_interpreter;
+		const usz sites = fs_text.size();
+		fs_text = fmt::replace_all(fs_text, "texture(SAMPLER2D(ur0), coord.xy, bias)", "texture(SAMPLER2D(ur0), vec3(coord.xy, float(gl_ViewIndex)), bias)");
+		fs_text = fmt::replace_all(fs_text, "textureLod(SAMPLER2D(ur0), coord.xy, lod)", "textureLod(SAMPLER2D(ur0), vec3(coord.xy, float(gl_ViewIndex)), lod)");
+		ensure(fs_text.size() > sites); // the interpreter's 2D sampling sites changed: update the replacements
+		OS << fs_text;
+	}
+} // namespace vk
+
+// ---- Push descriptors ---------------------------------------------------------------------------------
+
+namespace vk
+{
+	u32 vr_push_descriptor_limit(VkPhysicalDevice dev)
+	{
+		static const bool s_allowed = []
+		{
+			const char* v = std::getenv("RPCS3_VK_PUSH_DESCRIPTORS");
+			return !v || v[0] != '0';
+		}();
+		if (!s_allowed || !supported_extensions(supported_extensions::device, nullptr, dev).is_supported(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME))
+		{
+			return 0;
+		}
+		VkPhysicalDevicePushDescriptorPropertiesKHR push_props{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR };
+		VkPhysicalDeviceProperties2 props2{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &push_props };
+		vkGetPhysicalDeviceProperties2(dev, &props2);
+		if (push_props.maxPushDescriptors)
+		{
+			rsx_log.notice("Push descriptors available (up to %u per set)", push_props.maxPushDescriptors);
+		}
+		return push_props.maxPushDescriptors;
+	}
+
+	VkDescriptorSetLayout vr_push_descriptor_layout(glsl::descriptor_table_t& table, const rsx::simple_array<VkDescriptorSetLayoutBinding>& bindings)
+	{
+		auto& push = table.m_vr_push;
+		push.enabled = false;
+		if (!push.candidate)
+		{
+			return VK_NULL_HANDLE;
+		}
+		u32 total = 0;
+		for (const auto& binding : bindings)
+		{
+			total += binding.descriptorCount;
+		}
+		if (!total || total > g_render_device->get_push_descriptor_limit())
+		{
+			return VK_NULL_HANDLE;
+		}
+		// Push sets take no update-after-bind flags: they are written when the command is recorded.
+		const VkDescriptorSetLayoutCreateInfo info
+		{
+			.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+			.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+			.bindingCount = ::size32(bindings),
+			.pBindings = bindings.data()
+		};
+		VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+		CHECK_RESULT(vkCreateDescriptorSetLayout(*g_render_device, &info, nullptr, &layout));
+		push.enabled = true;
+		return layout;
+	}
+
+	void vr_push_descriptor_table(glsl::descriptor_table_t& table, const command_buffer& cmd, VkPipelineBindPoint bind_point,
+		VkPipelineLayout layout, u32 set_index, bool still_bound)
+	{
+		auto& push = table.m_vr_push;
+		if (still_bound && push.writes_valid && !table.m_any_descriptors_dirty && push.last_cmd == static_cast<VkCommandBuffer>(cmd))
+		{
+			return;
+		}
+
+		const u32 slots = ::size32(table.m_descriptor_slots);
+		if (push.writes.size() != slots)
+		{
+			push.writes.resize(slots);
+			push.arrays.resize(slots);
+			push.writes_valid = false;
+		}
+
+		if (!push.writes_valid || table.m_any_descriptors_dirty)
+		{
+			for (u32 i = 0; i < slots; ++i)
+			{
+				if (push.writes_valid && !table.m_descriptors_dirty[i])
+				{
+					continue;
+				}
+
+				auto& write = push.writes[i];
+				write = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = i, .descriptorCount = 1, .descriptorType = table.m_descriptor_types[i] };
+				const auto& slot = table.m_descriptor_slots[i];
+
+				if (auto ptr = std::get_if<VkDescriptorImageInfoEx>(&slot))
+				{
+					write.pImageInfo = ptr;
+				}
+				else if (auto ptr = std::get_if<VkDescriptorBufferInfoEx>(&slot))
+				{
+					write.pBufferInfo = ptr;
+				}
+				else if (auto ptr = std::get_if<VkDescriptorBufferViewEx>(&slot))
+				{
+					write.pTexelBufferView = &ptr->view;
+				}
+				else if (auto ptr = std::get_if<glsl::descriptor_image_array_t>(&slot))
+				{
+					push.arrays[i] = ptr->map(FN(static_cast<VkDescriptorImageInfo>(x)));
+					write.descriptorCount = ::size32(push.arrays[i]);
+					write.pImageInfo = push.arrays[i].data();
+				}
+				else
+				{
+					fmt::throw_exception("Unexpected descriptor structure at index %u", i);
+				}
+
+				table.m_descriptors_dirty[i] = false;
+			}
+
+			push.writes_valid = true;
+			table.m_any_descriptors_dirty = false;
+		}
+
+		_vkCmdPushDescriptorSetKHR(cmd, bind_point, layout, set_index, ::size32(push.writes), push.writes.data());
+		push.last_cmd = cmd;
+	}
+}
+
+// ---- GPU checkpoints ----------------------------------------------------------------------------------
+
+namespace vk
+{
+	std::string retrieve_device_fault_info(); // vkutils/shared.cpp
+
+	namespace
+	{
+		VkPhysicalDeviceDiagnosticsConfigFeaturesNV s_ckpt_features{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DIAGNOSTICS_CONFIG_FEATURES_NV };
+		VkDeviceDiagnosticsConfigCreateInfoNV s_ckpt_config{ .sType = VK_STRUCTURE_TYPE_DEVICE_DIAGNOSTICS_CONFIG_CREATE_INFO_NV };
+		bool s_ckpt_supported = false, s_ckpt_config_supported = false;
+		PFN_vkCmdSetCheckpointNV s_set_checkpoint = nullptr;
+		PFN_vkGetQueueCheckpointDataNV s_get_checkpoints = nullptr;
+		std::array<vr_gpu_checkpoint_info, 1u << 16> s_ckpt_ring{};
+		atomic_t<u64> s_ckpt_next = 0;
+		atomic_t<bool> s_ckpt_reported = false;
+		atomic_t<u32> s_ckpt_frame = 0;
+
+		// Address binding reports.
+		bool s_abr_supported = false;
+		VkPhysicalDeviceAddressBindingReportFeaturesEXT s_abr_features{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ADDRESS_BINDING_REPORT_FEATURES_EXT };
+		VkDebugUtilsMessengerEXT s_abr_messenger = VK_NULL_HANDLE;
+		struct abr_event
+		{
+			u64 base, size, handle, seq;
+			u32 object_type, frame;
+			bool bind;
+		};
+		std::mutex s_abr_mutex;
+		std::vector<abr_event> s_abr_events; // bounded: the newest 400,000
+		u64 s_abr_seq = 0;
+
+		VKAPI_ATTR VkBool32 VKAPI_CALL abr_callback(VkDebugUtilsMessageSeverityFlagBitsEXT, VkDebugUtilsMessageTypeFlagsEXT type,
+			const VkDebugUtilsMessengerCallbackDataEXT* data, void*)
+		{
+			if (!(type & VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT) || !data)
+			{
+				return VK_FALSE;
+			}
+			for (auto* p = static_cast<const VkBaseInStructure*>(data->pNext); p; p = p->pNext)
+			{
+				if (p->sType != VK_STRUCTURE_TYPE_DEVICE_ADDRESS_BINDING_CALLBACK_DATA_EXT)
+					continue;
+				const auto* b = reinterpret_cast<const VkDeviceAddressBindingCallbackDataEXT*>(p);
+				abr_event e{ b->baseAddress, b->size, data->objectCount ? data->pObjects[0].objectHandle : 0, 0,
+					data->objectCount ? static_cast<u32>(data->pObjects[0].objectType) : 0u, s_ckpt_frame.load(),
+					b->bindingType == VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT };
+				std::lock_guard lock(s_abr_mutex);
+				e.seq = s_abr_seq++;
+				if (s_abr_events.size() >= 400'000)
+					s_abr_events.erase(s_abr_events.begin(), s_abr_events.begin() + 100'000);
+				s_abr_events.push_back(e);
+			}
+			return VK_FALSE;
+		}
+	}
+
+	void vr_gpu_checkpoints_instance_extensions(std::vector<const char*>& extensions)
+	{
+		vk::dlss_instance_extensions(extensions); // DLSS test: NGX's instance extensions (RPCS3_DLSS)
+		if (!vr_gpu_checkpoints_enabled())
+		{
+			return;
+		}
+		const supported_extensions support(supported_extensions::instance);
+		if (support.is_supported(VK_EXT_DEBUG_UTILS_EXTENSION_NAME) &&
+			std::none_of(extensions.begin(), extensions.end(), [](const char* e) { return std::string_view(e) == VK_EXT_DEBUG_UTILS_EXTENSION_NAME; }))
+		{
+			extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+		}
+	}
+
+	void vr_gpu_checkpoints_messenger(VkInstance instance)
+	{
+		vk::framegen_note_instance(instance); // framegen: DLSS-G's device extension query needs it
+		if (!vr_gpu_checkpoints_enabled() || s_abr_messenger)
+		{
+			return;
+		}
+		const auto create = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT"));
+		if (!create)
+		{
+			rsx_log.warning("GPU checkpoints: no VK_EXT_debug_utils, no address binding reports");
+			return;
+		}
+		const VkDebugUtilsMessengerCreateInfoEXT info
+		{
+			.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+			.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT,
+			.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT,
+			.pfnUserCallback = abr_callback
+		};
+		create(instance, &info, nullptr, &s_abr_messenger);
+	}
+
+	// Dev barrier census (RPCS3_VR_BARRIER_CENSUS=1): every pipeline barrier recorded through vkutils counts against its
+	// three nearest callers; every 5 s the log gets the total per second and the top call chains.
+	void vr_barrier_census()
+	{
+		static const bool s_on = std::getenv("RPCS3_VR_BARRIER_CENSUS") != nullptr;
+		if (!s_on)
+		{
+			return;
+		}
+		struct chain_t
+		{
+			void* f[3];
+			bool operator==(const chain_t& o) const { return f[0] == o.f[0] && f[1] == o.f[1] && f[2] == o.f[2]; }
+		};
+		struct chain_hash
+		{
+			usz operator()(const chain_t& c) const { return std::hash<void*>()(c.f[0]) ^ (std::hash<void*>()(c.f[1]) << 1) ^ (std::hash<void*>()(c.f[2]) << 2); }
+		};
+		static std::mutex s_mutex;
+		static std::unordered_map<chain_t, u32, chain_hash> s_counts;
+		static u64 s_start = 0;
+		static u64 s_total = 0;
+		chain_t chain{};
+#ifdef _WIN32
+		void* frames[4]{};
+		const USHORT n = RtlCaptureStackBackTrace(1, 4, frames, nullptr);
+		for (USHORT i = 1; i < n && i < 4; ++i)
+			chain.f[i - 1] = frames[i];
+#endif
+		std::lock_guard lock(s_mutex);
+		s_counts[chain]++;
+		s_total++;
+		const u64 now = get_system_time();
+		if (!s_start)
+		{
+			s_start = now;
+		}
+		if (now - s_start < 5'000'000)
+		{
+			return;
+		}
+		std::vector<std::pair<u32, chain_t>> order;
+		for (const auto& [c, count] : s_counts)
+			order.emplace_back(count, c);
+		std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+		std::string text = fmt::format("VR barrier census: %.0f barriers/s over %.1f s; top call chains (count/s: caller < its caller < ...):", s_total * 1e6 / (now - s_start), (now - s_start) / 1e6);
+		for (usz i = 0; i < std::min<usz>(order.size(), 14); ++i)
+		{
+			std::vector<void*> stack;
+			for (void* f : order[i].second.f)
+				if (f) stack.push_back(f);
+			const auto names = utils::get_backtrace_symbols(stack);
+			std::string joined;
+			for (const auto& nm : names)
+			{
+				std::string_view v = nm;
+				if (v.size() > 90) v = v.substr(0, 90);
+				joined += (joined.empty() ? "" : " < ") + std::string(v);
+			}
+			fmt::append(text, "\n   %7.1f  %s", order[i].first * 1e6 / (now - s_start), joined);
+		}
+		rsx_log.notice("%s", text);
+		s_counts.clear();
+		s_total = 0;
+		s_start = now;
+	}
+
+	bool vr_gpu_checkpoints_enabled()
+	{
+		static const bool s_on = []
+		{
+			const char* v = std::getenv("RPCS3_VR_GPU_CHECKPOINTS");
+			return v && v[0] == '1';
+		}();
+		return s_on;
+	}
+
+	static VkPhysicalDevice s_device_pdev = VK_NULL_HANDLE; // the device being created (vr_gpu_checkpoints_chain)
+
+	void vr_gpu_checkpoints_extensions(VkPhysicalDevice pdev, std::vector<const char*>& extensions)
+	{
+		s_device_pdev = pdev;
+		vk::dlss_device_extensions(pdev, extensions); // DLSS test: NGX's device extensions (RPCS3_DLSS)
+		if (!vr_gpu_checkpoints_enabled())
+		{
+			return;
+		}
+		const supported_extensions support(supported_extensions::device, nullptr, pdev);
+		s_ckpt_supported = support.is_supported(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+		s_ckpt_config_supported = support.is_supported(VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME);
+		if (s_ckpt_supported)
+			extensions.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+		if (s_ckpt_config_supported)
+			extensions.push_back(VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME);
+		s_abr_supported = support.is_supported(VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME);
+		if (s_abr_supported)
+			extensions.push_back(VK_EXT_DEVICE_ADDRESS_BINDING_REPORT_EXTENSION_NAME);
+		rsx_log.warning("GPU checkpoints (RPCS3_VR_GPU_CHECKPOINTS): checkpoints %s, diagnostics config %s, address binding reports %s",
+			s_ckpt_supported ? "on" : "unsupported", s_ckpt_config_supported ? "on" : "unsupported", s_abr_supported ? "on" : "unsupported");
+	}
+
+	void vr_gpu_checkpoints_chain(VkDeviceCreateInfo& info)
+	{
+		vk::dlss_device_chain(s_device_pdev, info); // DLSS test: the features NGX needs (RPCS3_DLSS)
+		if (!vr_gpu_checkpoints_enabled())
+		{
+			return;
+		}
+		if (s_abr_supported)
+		{
+			s_abr_features.reportAddressBinding = VK_TRUE;
+			s_abr_features.pNext = const_cast<void*>(info.pNext);
+			info.pNext = &s_abr_features;
+		}
+		if (!s_ckpt_config_supported)
+		{
+			return;
+		}
+		s_ckpt_features.diagnosticsConfig = VK_TRUE;
+		s_ckpt_features.pNext = const_cast<void*>(info.pNext);
+		s_ckpt_config.flags = VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_DEBUG_INFO_BIT_NV | VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_RESOURCE_TRACKING_BIT_NV |
+			VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_AUTOMATIC_CHECKPOINTS_BIT_NV | VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_ERROR_REPORTING_BIT_NV;
+		s_ckpt_config.pNext = &s_ckpt_features;
+		info.pNext = &s_ckpt_config;
+	}
+
+	void vr_gpu_checkpoint(VkCommandBuffer cmd, const vr_gpu_checkpoint_info& info)
+	{
+		if (!vr_gpu_checkpoints_enabled() || !s_ckpt_supported || !cmd)
+		{
+			return;
+		}
+		if (!s_set_checkpoint)
+		{
+			s_set_checkpoint = reinterpret_cast<PFN_vkCmdSetCheckpointNV>(vkGetDeviceProcAddr(*g_render_device, "vkCmdSetCheckpointNV"));
+			s_get_checkpoints = reinterpret_cast<PFN_vkGetQueueCheckpointDataNV>(vkGetDeviceProcAddr(*g_render_device, "vkGetQueueCheckpointDataNV"));
+			if (!s_set_checkpoint)
+			{
+				s_ckpt_supported = false;
+				return;
+			}
+		}
+		const u64 id = s_ckpt_next++;
+		s_ckpt_ring[id % s_ckpt_ring.size()] = info;
+		if (info.kind == 2)
+			s_ckpt_frame = info.frame;
+		s_set_checkpoint(cmd, reinterpret_cast<const void*>(static_cast<uptr>(id + 1)));
+	}
+
+	void vr_gpu_checkpoints_check(VkDevice dev, VkFence any_fence, VkQueue render_queue, VkQueue xr_queue)
+	{
+		if (!vr_gpu_checkpoints_enabled() || !dev || !any_fence || s_ckpt_reported)
+		{
+			return;
+		}
+		if (vkGetFenceStatus(dev, any_fence) != VK_ERROR_DEVICE_LOST || s_ckpt_reported.exchange(true))
+		{
+			return;
+		}
+		rsx_log.error("GPU checkpoints: device lost; %llu markers were set", s_ckpt_next.load());
+		const auto dump_queue = [&](VkQueue queue, const char* name)
+		{
+			if (!queue || !s_get_checkpoints)
+			{
+				return;
+			}
+			u32 count = 0;
+			s_get_checkpoints(queue, &count, nullptr);
+			std::vector<VkCheckpointDataNV> data(count, VkCheckpointDataNV{ .sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV });
+			s_get_checkpoints(queue, &count, data.data());
+			rsx_log.error("GPU checkpoints: %s queue: %u entries", name, count);
+			for (const auto& d : data)
+			{
+				const u64 marker = reinterpret_cast<uptr>(d.pCheckpointMarker);
+				if (!marker || marker > s_ckpt_next)
+				{
+					rsx_log.error("  stage 0x%x: marker 0x%llx (not ours: driver automatic checkpoint)", static_cast<u32>(d.stage), marker);
+					continue;
+				}
+				const u64 id = marker - 1;
+				const auto& e = s_ckpt_ring[id % s_ckpt_ring.size()];
+				rsx_log.error("  stage 0x%x: marker %llu (%llu before the newest): kind %u frame %u draw %u fifo 0x%x vp %016llx fp %016llx target 0x%x %ux%u",
+					static_cast<u32>(d.stage), id, s_ckpt_next - 1 - id, e.kind, e.frame, e.draw, e.fifo_pos, e.vp_hash, e.fp_hash, e.target, e.target_w, e.target_h);
+			}
+		};
+		dump_queue(render_queue, "render");
+		dump_queue(xr_queue, "OpenXR");
+		const std::string fault = retrieve_device_fault_info();
+		rsx_log.error("GPU checkpoints: driver fault info: %s", fault);
+
+		// Every reported binding that covered a faulting address (oldest first): what lived there, and whether it was freed.
+		for (usz pos = fault.find("address 0x"); pos != umax; pos = fault.find("address 0x", pos + 1))
+		{
+			const u64 address = std::strtoull(fault.c_str() + pos + 8, nullptr, 16);
+			std::lock_guard lock(s_abr_mutex);
+			u32 shown = 0;
+			for (const auto& e : s_abr_events)
+			{
+				if (address >= e.base && address < e.base + e.size && shown++ < 40)
+				{
+					rsx_log.error("GPU checkpoints: 0x%llx: #%llu %s base 0x%llx size 0x%llx object type %u handle 0x%llx at frame %u",
+						address, e.seq, e.bind ? "BIND" : "UNBIND", e.base, e.size, e.object_type, e.handle, e.frame);
+				}
+			}
+			rsx_log.error("GPU checkpoints: 0x%llx: %u bindings covered it (%llu reported in all, newest frame %u)", address, shown, s_abr_seq, s_ckpt_frame.load());
+			// The device memory allocations ending nearest below it (a write past the end of one, into unused address
+			// space, faults there; memory allocated afterwards can then cover the address).
+			std::vector<const abr_event*> below;
+			for (const auto& e : s_abr_events)
+			{
+				if (e.bind && e.object_type == VK_OBJECT_TYPE_DEVICE_MEMORY && e.base + e.size <= address)
+				{
+					below.push_back(&e);
+				}
+			}
+			std::sort(below.begin(), below.end(), [](const abr_event* a, const abr_event* b) { return a->base + a->size > b->base + b->size; });
+			for (usz i = 0; i < below.size() && i < 6; ++i)
+			{
+				const auto& e = *below[i];
+				const bool freed = std::any_of(s_abr_events.begin(), s_abr_events.end(), [&](const abr_event& u) { return !u.bind && u.handle == e.handle && u.seq > e.seq; });
+				rsx_log.error("GPU checkpoints: 0x%llx: 0x%llx past the end of memory #%llu base 0x%llx size 0x%llx handle 0x%llx bound at frame %u%s",
+					address, address - (e.base + e.size), e.seq, e.base, e.size, e.handle, e.frame, freed ? " (freed since)" : "");
+			}
+		}
+	}
+} // namespace vk

@@ -414,7 +414,8 @@ namespace glsl
 				{ "FORMAT_FEATURE_SIGNED_BIT", rsx::texture_control_bits::FF_SIGNED_BIT },
 				{ "FORMAT_FEATURE_GAMMA_BIT",  rsx::texture_control_bits::FF_GAMMA_BIT },
 				{ "FORMAT_FEATURE_BIASED_RENORMALIZATION_BIT", rsx::texture_control_bits::FF_BIASED_RENORM_BIT },
-				{ "FORMAT_FEATURE_16BIT_CHANNELS_BIT", rsx::texture_control_bits::FF_16BIT_CHANNELS_BIT }
+				{ "FORMAT_FEATURE_16BIT_CHANNELS_BIT", rsx::texture_control_bits::FF_16BIT_CHANNELS_BIT },
+				{ "VR_REPROJECT_BIT", rsx::texture_control_bits::VR_REPROJECT_BIT }
 			});
 
 			if (props.require_texture_expand)
@@ -498,10 +499,10 @@ namespace glsl
 					#include "GLSLSnippets/RSXProg/RSXFragmentTextureMSAAOpsInternal.glsl"
 				;
 
-				OS << fmt::replace_all(msaa_sampling_impl, "_MSAA_SAMPLER_TYPE_", "sampler2DMS");
+				OS << fmt::replace_all(msaa_sampling_impl, "_MSAA_SAMPLER_TYPE_", props.vr_multiview ? "sampler2DMSArray" : "sampler2DMS");
 				if (props.require_depth_conversion)
 				{
-					OS << fmt::replace_all(msaa_sampling_impl, "_MSAA_SAMPLER_TYPE_", "usampler2DMS");
+					OS << fmt::replace_all(msaa_sampling_impl, "_MSAA_SAMPLER_TYPE_", props.vr_multiview ? "usampler2DMSArray" : "usampler2DMS");
 				}
 			}
 		}

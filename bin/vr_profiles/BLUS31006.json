@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "title_id": "BLUS31006",
+  "app_version": "01.00",
+  "name": "Tales of Xillia",
+  "max_fps": 0,
+  "default_fps": 0,
+  "game_frame_time_f32": ["0xf11ac8"],
+
+  "matrix_layout": "row_vectors",
+  "camera_blocks": [0],
+  "output_aspect_tolerance": 0.02,
+
+  "camera_position": {
+    "eye_baseline": 3.20002
+  },
+
+  "stereo": {
+    "formula": "clip_x_shear",
+    "per_eye_separation": 0.0169749,
+    "convergence": 128.001,
+    "eye_offset": "baseline_per_w"
+  },
+
+  "screen_space": {
+    "frames_without_3d_as_screen": true,
+    "orthographic_block": 0,
+    "hud_skips_passes": true,
+    "unboxed_draws": [ { "program": "fc3fabcf3cb724b2", "texture": "2560x720" } ]
+  }
+}

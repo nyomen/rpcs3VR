@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "rpcs3_version.h"
 #include "git-version.h"
+#include "rpcs3_vr_version.h" // VR fork
 #include "Utilities/StrUtil.h"
 
 namespace rpcs3
@@ -26,12 +27,19 @@ namespace rpcs3
 
 	const utils::version& get_version()
 	{
-		static constexpr utils::version version{ 0, 0, 43, utils::version_type::alpha, 1, RPCS3_GIT_VERSION };
+		static constexpr utils::version version{ 0, 0, 43, utils::version_type::alpha, 1, RPCS3_VR_VERSION "-" RPCS3_GIT_VERSION }; // VR fork
 		return version;
 	}
 
 	std::string get_version_and_branch()
 	{
+		// VR fork: the VR branch shows its full version, "0.0.42-vr1-<commit> Alpha" (branch and build
+		// details stay in the log).
+		if (rpcs3::get_branch() == "openxr"sv)
+		{
+			return rpcs3::get_version().to_string();
+		}
+
 		// Add branch and commit hash to version on frame unless it's master.
 		if (rpcs3::get_branch() != "master"sv && rpcs3::get_branch() != "HEAD"sv)
 		{

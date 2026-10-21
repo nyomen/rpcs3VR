@@ -97,7 +97,7 @@ namespace vk
 				raw->current_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 				src_stage, dst_stage,
 				src_access, dst_access,
-				{ raw->aspect(), 0, 1, 0, 1 });
+				{ raw->aspect(), 0, 1, 0, raw->layers() }); // VR fork: every layer (multiview); layer 0 alone left layer 1 in the loop layout, untracked
 
 			raw->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 			break;
@@ -322,7 +322,9 @@ void VKGSRender::load_texture_env()
 			continue;
 		}
 
+		const auto vr_redirect = vr_redirect_texture(i, tex); // VR fork: profile texture_redirects
 		*sampler_state = m_texture_cache.upload_texture(*m_current_command_buffer, tex, m_rtts);
+		vr_restore_texture(i, vr_redirect);
 		if (!sampler_state->validate())
 		{
 			continue;
@@ -644,7 +646,7 @@ void VKGSRender::load_texture_env()
 	}
 }
 
-bool VKGSRender::bind_texture_env()
+bool VKGSRender::bind_texture_env(bool vr_right_eye)
 {
 	bool out_of_memory = false;
 
@@ -668,7 +670,7 @@ bool VKGSRender::bind_texture_env()
 		if (rsx::method_registers.fragment_textures[i].enabled() &&
 			sampler_state->validate())
 		{
-			if (view = sampler_state->image_handle; !view)
+			if (view = vr_fragment_texture_view(i, sampler_state, vr_right_eye); !view) // VR fork: the right eye reads its own surfaces
 			{
 				//Requires update, copy subresource
 				if (!(view = m_texture_cache.create_temporary_subresource(*m_current_command_buffer, sampler_state->external_subresource_desc)))
@@ -684,7 +686,7 @@ bool VKGSRender::bind_texture_env()
 
 		if (view) [[likely]]
 		{
-			m_program->bind_uniform({ *view, *fs_sampler_handles[i] },
+			m_program->bind_uniform({ *vr_array_view(view, current_fragment_program.get_texture_dimension(i)), *fs_sampler_handles[i] }, // VR fork: multiview samples arrays
 				vk::glsl::binding_set_index_fragment,
 				m_fs_binding_table->ftex_location[i]);
 
@@ -705,14 +707,14 @@ bool VKGSRender::bind_texture_env()
 						VK_BORDER_COLOR_INT_OPAQUE_BLACK);
 				}
 
-				m_program->bind_uniform({ *stencil_view, *m_stencil_mirror_sampler },
+				m_program->bind_uniform({ *vr_array_view(stencil_view, current_fragment_program.get_texture_dimension(i)), *m_stencil_mirror_sampler }, // VR fork
 					vk::glsl::binding_set_index_fragment,
 					m_fs_binding_table->ftex_stencil_location[i]);
 			}
 		}
 		else
 		{
-			const VkImageViewType view_type = vk::get_view_type(current_fragment_program.get_texture_dimension(i));
+			const VkImageViewType view_type = vr_null_view_type(current_fragment_program.get_texture_dimension(i));
 			const VkDescriptorImageInfoEx desc = { *vk::null_image_view(*m_current_command_buffer, view_type), vk::null_sampler() };
 			m_program->bind_uniform(desc,
 				vk::glsl::binding_set_index_fragment,
@@ -743,7 +745,7 @@ bool VKGSRender::bind_texture_env()
 
 		if (!rsx::method_registers.vertex_textures[i].enabled())
 		{
-			const auto view_type = vk::get_view_type(current_vertex_program.get_texture_dimension(i));
+			const auto view_type = vr_null_view_type(current_vertex_program.get_texture_dimension(i));
 			m_program->bind_uniform({ *vk::null_image_view(*m_current_command_buffer, view_type), vk::null_sampler() },
 				vk::glsl::binding_set_index_vertex,
 				m_vs_binding_table->vtex_location[i]);
@@ -753,6 +755,7 @@ bool VKGSRender::bind_texture_env()
 
 		auto sampler_state = static_cast<vk::texture_cache::sampled_image_descriptor*>(vs_sampler_state[i].get());
 		auto image_ptr = sampler_state->image_handle;
+		if (vr_right_eye) image_ptr = vr_vertex_texture_view(i, sampler_state, image_ptr); // VR fork
 
 		if (!image_ptr && sampler_state->validate())
 		{
@@ -765,7 +768,7 @@ bool VKGSRender::bind_texture_env()
 		if (!image_ptr)
 		{
 			rsx_log.error("Texture upload failed to vtexture index %d. Binding null sampler.", i);
-			const auto view_type = vk::get_view_type(current_vertex_program.get_texture_dimension(i));
+			const auto view_type = vr_null_view_type(current_vertex_program.get_texture_dimension(i));
 
 			m_program->bind_uniform({ *vk::null_image_view(*m_current_command_buffer, view_type), vk::null_sampler() },
 				vk::glsl::binding_set_index_vertex,
@@ -776,16 +779,16 @@ bool VKGSRender::bind_texture_env()
 
 		validate_image_layout_for_read_access(*m_current_command_buffer, image_ptr, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, sampler_state);
 
-		m_program->bind_uniform({ *image_ptr, *vs_sampler_handles[i] },
+		m_program->bind_uniform({ *vr_array_view(image_ptr, current_vertex_program.get_texture_dimension(i)), *vs_sampler_handles[i] }, // VR fork
 			vk::glsl::binding_set_index_vertex,
 			m_vs_binding_table->vtex_location[i]);
 	}
 
 	if (current_fragment_program.ctrl & RSX_SHADER_CONTROL_EMULATE_DEPTH_COMPARE)
 	{
-		auto ds = ensure(m_rtts.m_bound_depth_stencil.second);
+		auto ds = ensure((vr_right_eye ? m_vr_right_rtts : m_rtts).m_bound_depth_stencil.second); // VR fork
 		auto view = ds->get_view(rsx::default_remap_vector, VK_IMAGE_ASPECT_DEPTH_BIT);
-		m_program->bind_uniform({ *view, vk::null_sampler() }, vk::glsl::binding_set_index_fragment, m_fs_binding_table->frag_depth_input_location);
+		m_program->bind_uniform({ *vr_array_view(view), vk::null_sampler() }, vk::glsl::binding_set_index_fragment, m_fs_binding_table->frag_depth_input_location); // VR fork
 	}
 
 	if (current_fragment_program.ctrl & RSX_SHADER_CONTROL_PROGRAMMABLE_BLENDING)
@@ -797,7 +800,7 @@ bool VKGSRender::bind_texture_env()
 		{
 			auto viewable = static_cast<vk::viewable_image*>(m_fbo_images[i]);
 			const auto view = viewable->get_view(remap);
-			m_program->bind_uniform(*view, vk::glsl::binding_set_index_fragment, m_fs_binding_table->frag_src_location[i]);
+			m_program->bind_uniform(*vr_array_view(view), vk::glsl::binding_set_index_fragment, m_fs_binding_table->frag_src_location[i]); // VR fork
 		}
 	}
 
@@ -828,7 +831,7 @@ bool VKGSRender::bind_interpreter_texture_env()
 	std::fill(start, end, fallback);
 	// 2D
 	start = end;
-	fallback.imageView = vk::null_image_view(*m_current_command_buffer, VK_IMAGE_VIEW_TYPE_2D)->value;
+	fallback.imageView = vk::null_image_view(*m_current_command_buffer, vr_null_view_type(rsx::texture_dimension_extended::texture_dimension_2d))->value; // VR fork: arrays with multiview
 	std::advance(end, 16);
 	std::fill(start, end, fallback);
 	// 3D
@@ -963,7 +966,7 @@ bool VKGSRender::bind_interpreter_texture_env()
 
 		const int offsets[] = { 0, 16, 48, 32 };
 		auto& sampled_image_info = texture_env[offsets[static_cast<u32>(sampler_state->image_type)] + i];
-		sampled_image_info = { *view, *fs_sampler_handles[i] };
+		sampled_image_info = { *vr_array_view(view, sampler_state->image_type), *fs_sampler_handles[i] }; // VR fork: multiview samples arrays
 	}
 
 	m_shader_interpreter.update_fragment_textures(texture_env);
@@ -1027,7 +1030,7 @@ void VKGSRender::emit_geometry(u32 sub_index)
 
 	// Faults are allowed during vertex upload. Ensure consistent CB state after uploads.
 	// Queries are spawned and closed outside render pass scope for consistency reasons.
-	if (m_current_command_buffer->flags & vk::command_buffer::cb_load_occluson_task)
+	if (!m_vr_multiview && (m_current_command_buffer->flags & vk::command_buffer::cb_load_occluson_task)) // VR fork: multiview begins its queries inside the pass
 	{
 		u32 occlusion_id = m_occlusion_query_manager->allocate_query(*m_current_command_buffer);
 		if (occlusion_id == umax)
@@ -1068,18 +1071,21 @@ void VKGSRender::emit_geometry(u32 sub_index)
 	VkDescriptorBufferViewEx persistent_buffer = m_persistent_attribute_storage ? *m_persistent_attribute_storage : *null_buffer_view;
 	VkDescriptorBufferViewEx volatile_buffer = m_volatile_attribute_storage ? *m_volatile_attribute_storage : *null_buffer_view;
 	bool update_descriptors = false;
+	vr_begin_draw(); // VR fork
 
 	if (m_current_draw.subdraw_id == 0)
 	{
 		update_descriptors = true;
 
 		// Allocate stream layout memory for this batch
-		const u64 alloc_size = rsx::method_registers.current_draw_clause.pass_count() * 168;
+		const u64 alloc_size = rsx::method_registers.current_draw_clause.pass_count() * 168 * (m_vr_draw.render ? 2 : 1); // VR fork: a layout entry per eye
 		m_vertex_layout_dynamic_offset = m_vertex_layout_ring_info.alloc<8>(alloc_size);
 	}
 
+	vr_setup_draw(); // VR fork
+
 	// Update vertex fetch parameters
-	update_vertex_env(sub_index, upload_info);
+	if (!m_vr_draw.render) update_vertex_env(sub_index, upload_info); // VR fork: per eye, after the pipeline bind
 
 	if (update_descriptors)
 	{
@@ -1122,7 +1128,7 @@ void VKGSRender::emit_geometry(u32 sub_index)
 				VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 				VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
 				VK_ACCESS_INPUT_ATTACHMENT_READ_BIT,
-				{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+				{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, m_fbo_images[i]->layers() }, // VR fork: every layer (multiview)
 				true,
 				VK_DEPENDENCY_BY_REGION_BIT
 			);
@@ -1132,6 +1138,7 @@ void VKGSRender::emit_geometry(u32 sub_index)
 	// Bind both pipe and descriptors in one go
 	// FIXME: We only need to rebind the pipeline when reload state is set. Flags?
 	m_program->bind(*m_current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
+	vr_after_pipeline_bind(sub_index, upload_info); // VR fork
 
 	if (reload_state)
 	{
@@ -1151,9 +1158,16 @@ void VKGSRender::emit_geometry(u32 sub_index)
 		}
 	}
 
+	vr_after_render_pass_bound(sub_index, upload_info); // VR fork: multiview, a pending guest query begins inside the pass; state bound again in a new pass
+
 	// Bind the new set of descriptors for use with this draw call
 	m_frame_stats.setup_time += m_profiler.duration();
+	vr_capture_draw(sub_index, upload_info); // VR fork
 
+	// VR fork: the draw commands are emitted once per eye. The lambda holds upstream's dispatch
+	// unchanged (same indentation) so that upstream edits to it merge cleanly.
+	const auto emit_vulkan_draw = [&]()
+	{
 	if (!upload_info.index_info)
 	{
 		if (draw_call.is_trivial_instanced_draw)
@@ -1232,6 +1246,16 @@ void VKGSRender::emit_geometry(u32 sub_index)
 			}
 		}
 	}
+	};
+
+	vr_before_left_draw(); // VR fork
+	if (!m_vr_draw.hud_hidden) emit_vulkan_draw(); // VR fork: Toggle HUD
+	if (vr_begin_right_eye(sub_index, upload_info)) // VR fork: the same draw for the right eye
+	{
+		if (!m_vr_draw.hud_hidden) emit_vulkan_draw();
+		vr_end_right_eye();
+	}
+	vr_end_draw();
 
 	m_frame_stats.draw_exec_time += m_profiler.duration();
 }
@@ -1289,11 +1313,18 @@ void VKGSRender::end()
 	}
 
 	analyse_current_rsx_pipeline();
+	vr_on_draw_begin(); // VR fork: dev GPU profiler
+	if (vr_skip_far_cars()) return; // VR fork: profile car_draw_limit
 
 	m_frame_stats.setup_time += m_profiler.duration();
 
 	load_texture_env();
 	m_frame_stats.textures_upload_time += m_profiler.duration();
+
+	if (vr_skip_draw()) // VR fork: profile hidden_draws, probe hide=
+	{
+		return;
+	}
 
 	if (!load_program())
 	{
@@ -1308,6 +1339,7 @@ void VKGSRender::end()
 	// Load program execution environment
 	load_program_env();
 	m_frame_stats.setup_time += m_profiler.duration();
+	vr_before_draw_setup(); // VR fork
 
 	// Apply write memory barriers
 	if (auto ds = std::get<1>(m_rtts.m_bound_depth_stencil))

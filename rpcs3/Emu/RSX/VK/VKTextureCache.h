@@ -6,6 +6,8 @@
 #include "VKRenderPass.h"
 #include "vkutils/image_helpers.h"
 
+#include "../Capture/rsx_camera_probe.h" // VR fork
+#include <span>
 #include "../Common/texture_cache.h"
 #include "../Common/tiled_dma_copy.hpp"
 #include "../Utils/image_utils.hpp"
@@ -300,11 +302,17 @@ namespace vk
 		{
 			AUDIT(synchronized);
 
-			// Synchronize, reset dma_fence after waiting
-			vk::wait_for_event(dma_fence.get(), GENERAL_WAIT_TIMEOUT);
-
 			// Calculate smallest range to flush - for framebuffers, the raster region is enough
 			const auto range = (context == rsx::texture_upload_context::framebuffer_storage) ? get_section_range() : get_confirmed_range();
+
+			// VR fork: readbacks the fork answers without waiting for the GPU (see occlusion_depth_readback, vr_late_readback).
+			if (rsx::vr::occlusion_depth_readback(range.start, range.end, get_ptr(range.start)) || vk::vr_late_readback(dma_fence.get(), range.start, range.length()))
+			{
+				return;
+			}
+
+			// Synchronize, reset dma_fence after waiting
+			vk::wait_for_event(dma_fence.get(), GENERAL_WAIT_TIMEOUT);
 			auto flush_length = range.length();
 
 			const auto tiled_region = rsx::get_current_renderer()->get_tiled_memory_region(range);
@@ -457,6 +465,12 @@ namespace vk
 		// Stuff that has been dereferenced by the GPU goes into these
 		const u32 max_cached_image_pool_size = 256;
 		std::deque<cached_image_t> m_cached_images;
+
+		// VR fork: display buffers uploaded from guest memory for a flip. Kept until the next flip:
+		// disposed at upload, any submit between the upload and the present blit (VR stereo,
+		// screenshots) let the image be freed before the blit read it (crashes at boot loading
+		// screens in Uncharted and Killzone 2).
+		std::vector<std::unique_ptr<vk::viewable_image>> m_flip_uploads;
 		atomic_t<u64> m_cached_memory_size = { 0 };
 		shared_mutex m_cached_pool_lock;
 
@@ -468,16 +482,18 @@ namespace vk
 		VkComponentMapping apply_component_mapping_flags(u32 gcm_format, rsx::component_order flags, const rsx::texture_channel_remap_t& remap_vector) const;
 
 		void copy_transfer_regions_impl(vk::command_buffer& cmd, vk::image* dst, const rsx::simple_array<copy_region_descriptor>& sections_to_transfer) const;
+		// VR fork (multiview): one layer of a stereo destination; stereo sources supply their matching layer, others their only one.
+		void copy_transfer_regions_layer(vk::command_buffer& cmd, vk::image* dst, const rsx::simple_array<copy_region_descriptor>& sections_to_transfer, u32 layer) const;
 
 		vk::image* get_template_from_collection_impl(const rsx::simple_array<copy_region_descriptor>& sections_to_transfer) const;
 
-		std::unique_ptr<vk::viewable_image> find_cached_image(VkFormat format, u16 w, u16 h, u16 d, u16 mipmaps, VkImageType type, VkImageCreateFlags create_flags, VkImageUsageFlags usage, VkSharingMode sharing);
+		std::unique_ptr<vk::viewable_image> find_cached_image(VkFormat format, u16 w, u16 h, u16 d, u16 mipmaps, VkImageType type, VkImageCreateFlags create_flags, VkImageUsageFlags usage, VkSharingMode sharing, u16 layers = 1);
 
 	protected:
 		vk::image_view* create_temporary_subresource_view_impl(
 			vk::command_buffer& cmd, vk::image* source, VkImageType image_type, VkImageViewType view_type,
 			u32 gcm_format, u16 w, u16 h, u16 d, u8 mips, const rsx::texture_channel_remap_t& remap_vector,
-			const copy_region_descriptor* copy = nullptr);
+			const copy_region_descriptor* copy = nullptr, u16 layers_hint = 0);
 
 		vk::image_view* create_temporary_subresource_view(vk::command_buffer& cmd, const deferred_subresource& desc) override;
 
@@ -534,7 +550,38 @@ namespace vk
 
 		vk::viewable_image* upload_image_simple(vk::command_buffer& cmd, VkFormat format, u32 address, u32 width, u32 height, u32 pitch);
 
+		// VR fork: dispose the previous flip's uploads (call at the start of a flip).
+		void release_flip_uploads();
+
 		bool blit(const rsx::blit_src_info& src, const rsx::blit_dst_info& dst, bool interpolate, vk::surface_cache& m_rtts, vk::command_buffer& cmd);
+
+		// VR fork: repeat a blit inside the right-eye surface store. Only when both ends are
+		// surfaces there, and never flushed to guest memory (the left eye owns memory).
+		bool blit_vr_right(const rsx::blit_src_info& src, const rsx::blit_dst_info& dst, bool interpolate, vk::surface_cache& store, vk::command_buffer& cmd);
+
+		// VR fork: copy the unsynchronized sections overlapping range whose section range is listed (read back
+		// before), without asking the predictor. See VKGSRender::vr_before_prepare_rtts.
+		bool flush_listed_sections(vk::command_buffer& cmd, const utils::address_range32& range, std::span<const utils::address_range32> listed)
+		{
+			auto& block = m_storage.block_for(range);
+			if (block.empty())
+				return false;
+
+			reader_lock lock(m_cache_mutex);
+			bool result = false;
+			for (auto& region : block)
+			{
+				if (region.is_dirty() || region.is_synchronized() || !region.is_flushable() || !region.get_section_range().overlaps(range))
+					continue;
+				if (std::find(listed.begin(), listed.end(), region.get_section_range()) == listed.end())
+					continue;
+
+				lock.upgrade();
+				region.copy_texture(cmd, false);
+				result = true;
+			}
+			return result;
+		}
 
 		u32 get_unreleased_textures_count() const override;
 

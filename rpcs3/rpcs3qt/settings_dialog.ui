@@ -598,6 +598,9 @@
                 </widget>
                </item>
                <item>
+                <widget class="vr_settings_widget" name="vr_settings" native="true"/>
+               </item>
+               <item>
                 <spacer name="gpu_tab_layout_right_spacer">
                  <property name="orientation">
                   <enum>Qt::Orientation::Vertical</enum>
@@ -4946,6 +4949,12 @@
    <class>auto_scroll_label</class>
    <extends>QLabel</extends>
    <header>auto_scroll_label.h</header>
+  </customwidget>
+  <customwidget>
+   <class>vr_settings_widget</class>
+   <extends>QWidget</extends>
+   <header>vr_settings_widget.h</header>
+   <container>1</container>
   </customwidget>
  </customwidgets>
  <resources>

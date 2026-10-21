@@ -11,6 +11,7 @@
 #include "Emu/system_config.h"
 #include "sys_event.h"
 #include "sys_process.h"
+#include "Emu/RSX/Capture/rsx_vr_hooks.h" // VR fork
 
 #include <thread>
 #include <deque>
@@ -452,6 +453,8 @@ error_code sys_timer_usleep(ppu_thread& ppu, u64 sleep_time)
 	ppu.state += cpu_flag::wait;
 
 	sys_timer.trace("sys_timer_usleep(sleep_time=0x%llx)", sleep_time);
+
+	rsx::vr::dev::on_usleep(ppu, sleep_time); // VR fork: development hooks (RPCS3_PPU_TRACE, RPCS3_PPU_WATCH, RPCS3_PPU_SAMPLE, RPCS3_USLEEP_STATS, ...)
 
 	if (sleep_time)
 	{

@@ -1,0 +1,14 @@
+Version: 1.2
+
+PPU-87bda999eb08ef36bfb8f3abf2cd95a7e8a615d8:
+  "Unlocked frame rate (follows Vblank Rate)":
+    Games:
+      "Pure":
+        BLUS30182: [ 01.00 ]
+    Author: "VR fork"
+    Notes: "Presents a frame on every vblank instead of every second one: races run at the vblank rate (60 on a TV, the headset's refresh rate in VR) instead of 30. The VR profile keeps the game at real-time speed by writing the vblank rate into the game's refresh-rate variable (PSGL device+0x14)."
+    Patch Version: 1.1
+    Enabled By Default: true
+    Patch:
+      - [ be32, 0x007676e4, 0x39600001 ] # li r11,1 (was lwz r11,0x14(r30)): swap interval 1 in the flip wait
+      - [ be32, 0x0076782c, 0x39200001 ] # li r9,1 (was lwz r9,0x14(r31)): swap interval 1 in the vblank-handler wait

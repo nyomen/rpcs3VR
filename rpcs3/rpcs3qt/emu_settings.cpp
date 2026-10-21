@@ -1516,6 +1516,67 @@ QString emu_settings::GetLocalizedSetting(const QString& original, emu_settings_
 		case vsync_mode::adaptive: return tr("Adaptive", "VSync Mode");
 		case vsync_mode::full: return tr("Full", "VSync Mode");
 		}
+	// VR fork
+	case emu_settings_type::VRFrameRate:
+		switch (static_cast<vr_frame_rate>(index))
+		{
+		case vr_frame_rate::profile_default: return tr("Default", "VR frame rate");
+		case vr_frame_rate::fps_30: return tr("30 FPS", "VR frame rate");
+		case vr_frame_rate::fps_45: return tr("45 FPS", "VR frame rate");
+		case vr_frame_rate::fps_60: return tr("60 FPS", "VR frame rate");
+		case vr_frame_rate::fps_72: return tr("72 FPS", "VR frame rate");
+		case vr_frame_rate::fps_75: return tr("75 FPS", "VR frame rate");
+		case vr_frame_rate::fps_80: return tr("80 FPS", "VR frame rate");
+		case vr_frame_rate::fps_90: return tr("90 FPS", "VR frame rate");
+		case vr_frame_rate::fps_120: return tr("120 FPS", "VR frame rate");
+		case vr_frame_rate::fps_144: return tr("144 FPS", "VR frame rate");
+		case vr_frame_rate::unlimited: return tr("Unlimited (headset refresh rate)", "VR frame rate");
+		}
+		break;
+	case emu_settings_type::VRCinematicScenes:
+		switch (static_cast<vr_cinematic_scenes>(index))
+		{
+		case vr_cinematic_scenes::fixed_screen: return tr("Fixed screen", "VR cinematic scenes");
+		case vr_cinematic_scenes::full_quality: return tr("Full quality", "VR cinematic scenes");
+		}
+		break;
+	case emu_settings_type::VRDlss:
+		switch (static_cast<vr_dlss_mode>(index))
+		{
+		case vr_dlss_mode::off: return tr("Off", "DLSS");
+		case vr_dlss_mode::dlaa: return tr("DLAA (anti-aliasing only)", "DLSS");
+		case vr_dlss_mode::quality: return tr("Quality (1.5x upscale)", "DLSS");
+		case vr_dlss_mode::balanced: return tr("Balanced (1.72x upscale)", "DLSS");
+		case vr_dlss_mode::performance: return tr("Performance (2x upscale)", "DLSS");
+		case vr_dlss_mode::ultra_performance: return tr("Ultra Performance (3x upscale)", "DLSS");
+		}
+		break;
+	case emu_settings_type::VRDlssModel:
+		switch (static_cast<vr_dlss_model>(index))
+		{
+		case vr_dlss_model::default_model: return tr("Default (NGX's choice per mode)", "DLSS model");
+		case vr_dlss_model::e: return tr("E: convolutional, fastest", "DLSS model");
+		case vr_dlss_model::f: return tr("F: convolutional", "DLSS model");
+		case vr_dlss_model::j: return tr("J: transformer", "DLSS model");
+		case vr_dlss_model::k: return tr("K: transformer, best quality", "DLSS model");
+		case vr_dlss_model::l: return tr("L: transformer (Ultra Performance default)", "DLSS model");
+		case vr_dlss_model::m: return tr("M: transformer (Performance default)", "DLSS model");
+		}
+		break;
+	case emu_settings_type::VRFrameGenMultiplier:
+		switch (static_cast<vr_framegen_multiplier>(index))
+		{
+		case vr_framegen_multiplier::x2: return tr("2x (one generated frame per rendered frame)", "Frame generation multiplier");
+		case vr_framegen_multiplier::x3: return tr("3x (two; RTX 50)", "Frame generation multiplier");
+		}
+		break;
+	case emu_settings_type::VRFrameGenMotion:
+		switch (static_cast<vr_framegen_motion>(index))
+		{
+		case vr_framegen_motion::hybrid: return tr("Hybrid (recommended)", "Frame generation motion");
+		case vr_framegen_motion::game: return tr("Game motion vectors", "Frame generation motion");
+		}
+		break;
 	default:
 		break;
 	}

@@ -104,6 +104,9 @@ namespace vk
 			bool texture_compression_bc = false;
 			bool portability = false;
 			bool provoking_vertex_last = false;
+			bool multiview = false;                   // VR fork: VK_KHR_multiview (core 1.1)
+			bool shader_viewport_index_layer = false; // VR fork: VK_EXT_shader_viewport_index_layer (per-view scissor)
+			u32 max_push_descriptors = 0;             // VR fork: VK_KHR_push_descriptor (0: unsupported or off)
 		} optional_features_support;
 
 		friend class render_device;
@@ -149,6 +152,10 @@ namespace vk
 		VkQueue m_graphics_queue = VK_NULL_HANDLE;
 		VkQueue m_present_queue = VK_NULL_HANDLE;
 		VkQueue m_transfer_queue = VK_NULL_HANDLE;
+		// A spare graphics queue for the OpenXR frame thread (VR), so the runtime's
+		// waits in xrEndFrame and the swapchain calls never hold RPCS3's queue.
+		VkQueue m_xr_queue = VK_NULL_HANDLE;
+		u32 m_xr_queue_index = 0;
 
 		u32 m_graphics_queue_family = 0;
 		u32 m_present_queue_family = 0;
@@ -183,6 +190,8 @@ namespace vk
 		bool get_anisotropic_filtering_support() const { return pgpu->features.samplerAnisotropy != VK_FALSE; }
 		bool get_wide_lines_support() const { return pgpu->features.wideLines != VK_FALSE; }
 		bool get_conditional_render_support() const { return pgpu->optional_features_support.conditional_rendering; }
+		bool get_multiview_support() const { return pgpu->optional_features_support.multiview; }
+		bool get_shader_viewport_index_layer_support() const { return pgpu->optional_features_support.shader_viewport_index_layer; }
 		bool get_unrestricted_depth_range_support() const { return pgpu->optional_features_support.unrestricted_depth_range; }
 		bool get_external_memory_host_support() const { return pgpu->optional_features_support.external_memory_host; }
 		bool get_surface_capabilities_2_support() const { return pgpu->optional_features_support.surface_capabilities_2; }
@@ -193,6 +202,7 @@ namespace vk
 		bool get_extended_device_fault_support() const { return pgpu->optional_features_support.extended_device_fault; }
 		bool get_texture_compression_bc_support() const { return pgpu->optional_features_support.texture_compression_bc; }
 		bool get_provoking_vertex_last_support() const { return pgpu->optional_features_support.provoking_vertex_last; }
+		u32 get_push_descriptor_limit() const { return pgpu->optional_features_support.max_push_descriptors; } // VR fork
 
 		u64 get_descriptor_update_after_bind_support() const { return pgpu->descriptor_indexing_support.update_after_bind_mask; }
 		u32 get_descriptor_max_draw_calls() const { return pgpu->descriptor_max_draw_calls; }
@@ -200,6 +210,8 @@ namespace vk
 		VkQueue get_present_queue() const { return m_present_queue; }
 		VkQueue get_graphics_queue() const { return m_graphics_queue; }
 		VkQueue get_transfer_queue() const { return m_transfer_queue; }
+		VkQueue get_xr_queue() const { return m_xr_queue; }
+		u32 get_xr_queue_index() const { return m_xr_queue_index; }
 		u32 get_graphics_queue_family() const { return m_graphics_queue_family; }
 		u32 get_present_queue_family() const { return m_graphics_queue_family; }
 		u32 get_transfer_queue_family() const { return m_transfer_queue_family; }

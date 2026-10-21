@@ -25,6 +25,7 @@
 #include "microphone_creator.h"
 #include "log_level_dialog.h"
 #include "anaglyph_settings_dialog.h"
+#include "vr_settings_widget.h" // VR fork
 
 #include "Emu/NP/rpcn_countries.h"
 #include "Emu/GameInfo.h"
@@ -587,6 +588,10 @@ settings_dialog::settings_dialog(std::shared_ptr<gui_settings> gui_settings, std
 		ui->gb_anaglyph_settings->setVisible(false);
 		ui->gb_stereo->setEnabled(false);
 	}
+
+	// VR fork: the VR settings (shown only for titles with a VR profile; see vr_settings_widget.cpp)
+	ui->vr_settings->init(m_emu_settings, game, [this](QObject* object, const QString& tooltip) { SubscribeTooltip(object, tooltip); },
+		[this](QSlider* slider, int interval) { SnapSlider(slider, interval); });
 
 	// Checkboxes: main options
 	EnhanceCheckBox(emu_settings_type::WriteColorBuffers, ui->dumpColor, tooltips.settings.dump_color);

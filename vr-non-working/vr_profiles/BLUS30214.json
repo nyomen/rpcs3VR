@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "title_id": "BLUS30214",
+  "app_version": "01.00",
+  "name": "Prince of Persia",
+  "max_fps": 0,
+  "default_fps": 0,
+
+  "culling_scale_f32": [
+    { "address": "0x15855d0", "fov_deg": 44, "aspect": 1.7778, "margin_deg": 3, "min": 1.0, "max": 6.0, "mode": "tangent_x", "option": "horizontal_view" },
+    { "address": "0x15855d8", "fov_deg": 44, "aspect": 1.7778, "margin_deg": 3, "min": 1.0, "max": 6.0, "mode": "tangent_y", "option": "vertical_view" },
+    { "address": "0x15855d4", "fov_deg": 44, "aspect": 1.7778, "margin_deg": 3, "min": 1.0, "max": 4.0, "mode": "tangent" }
+  ],
+
+  "fragment_constant_overrides": [
+    { "program": "f7865139bce5eba2", "constant": 0, "game_fov_deg": [71, 44] },
+    { "program": "f7865139bce5eba2", "constant": 2, "game_fov_deg": [71, 44] },
+    { "program": "f7865139bce5eba2", "constant": 5, "game_fov_deg": [71, 44] },
+    { "program": "f7865139bce5eba2", "constant": 10, "game_fov_deg": [71, 44] },
+    { "program": "f7865139bce5eba2", "constant": 11, "game_fov_deg": [71, 44] },
+    { "program": "f7865139bce5eba2", "constant": 13, "game_fov_deg": [71, 44] },
+    { "program": "f7865139bce5eba2", "constant": 15, "game_fov_deg": [71, 44] },
+    { "program": "f7865139bce5eba2", "constant": 17, "game_fov_deg": [71, 44] }
+  ],
+
+  "inverse_camera_programs": [
+    { "program": "149a9a825056ebba", "block": 200 }
+  ],
+
+  "matrix_layout": "column_vectors",
+  "camera_blocks": [200, 202, 206],
+  "require_rigid_camera": true,
+  "require_camera_aspect": true,
+  "camera_slots_read_directly": true,
+  "output_aspect_tolerance": 0.02,
+
+  "camera_position": {
+    "eye_baseline": 0.064
+  },
+
+  "stereo": {
+    "formula": "clip_x_shear",
+    "per_eye_separation": 0.0301777,
+    "convergence": 2.56,
+    "eye_offset": "baseline"
+  },
+
+  "screen_space": {
+    "orthographic_block": 200,
+    "hud_over_scene": true
+  }
+}

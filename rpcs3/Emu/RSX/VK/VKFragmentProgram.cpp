@@ -5,6 +5,7 @@
 #include "vkutils/device.h"
 #include "Emu/system_config.h"
 #include "../Program/GLSLCommon.h"
+#include "VKMultiviewVR.h" // VR fork
 
 std::string VKFragmentDecompilerThread::getFloatTypeName(usz elementCount)
 {
@@ -137,6 +138,7 @@ void VKFragmentDecompilerThread::insertHeader(std::stringstream & OS)
 	{
 		OS << "#extension " << ext << ": require\n";
 	}
+	vk::vr_insert_fragment_extensions(OS, m_prog.ctrl); // VR fork: multiview
 
 	OS << "#extension GL_ARB_separate_shader_objects: enable\n\n";
 
@@ -156,6 +158,8 @@ void VKFragmentDecompilerThread::insertInputs(std::stringstream & OS)
 		},
 		vk::get_varying_register_location
 	);
+	vk::vr_insert_exact_depth_fragment_input(OS, m_prog.ctrl); // VR fork: exact depth
+	vk::vr_insert_depth_remap_fragment_input(OS, m_prog.ctrl, m_prog.mrt_buffers_count, m_prog); // VR fork: depth remap, fragment camera rows (DLSS test: motion)
 }
 
 void VKFragmentDecompilerThread::insertOutputs(std::stringstream & OS)
@@ -230,6 +234,7 @@ void VKFragmentDecompilerThread::insertConstants(std::stringstream & OS)
 				}
 			}
 
+			vk::vr_set_sampler_type(samplerType, m_prog.ctrl); // VR fork: multiview samples 2D textures as arrays (layer = eye)
 			const int id = vk::get_texture_index(PI.name);
 			auto in = vk::glsl::program_input::make(
 				glsl::glsl_fragment_program,
@@ -260,7 +265,7 @@ void VKFragmentDecompilerThread::insertConstants(std::stringstream & OS)
 			? "sampler2DMS"
 			: "sampler2D";
 
-		OS << "layout(set=" << vk::glsl::binding_set_index_fragment << ", binding=" << vk_prog->binding_table.frag_depth_input_location << ") uniform " << frag_depth_type << " frag_depth;\n";
+		OS << "layout(set=" << vk::glsl::binding_set_index_fragment << ", binding=" << vk_prog->binding_table.frag_depth_input_location << ") uniform " << vk::vr_sampler_type(frag_depth_type, m_prog.ctrl) << " frag_depth;\n"; // VR fork: multiview arrays
 
 		inputs.push_back(vk::glsl::program_input::make(
 			glsl::glsl_fragment_program,
@@ -438,7 +443,9 @@ void VKFragmentDecompilerThread::insertGlobalFunctions(std::stringstream &OS)
 
 	OS <<
 		"#define texture_base_index _fs_texture_base_index\n"
-		"#define TEX_PARAM(index) texture_parameters_##index\n\n";
+		"#define TEX_PARAM(index) texture_parameters_##index\n"
+		"#define _VR_REPROJECT\n\n";
+	vk::vr_insert_fragment_defines(OS, m_shader_props, m_prog.ctrl); // VR fork: multiview (_VR_MULTIVIEW, array texture macros)
 
 	glsl::insert_glsl_legacy_function(OS, m_shader_props);
 }
@@ -534,6 +541,7 @@ void VKFragmentDecompilerThread::insertMainStart(std::stringstream & OS)
 
 		OS << "	const sampler_info texture_parameters_" << i << " = texture_parameters[texture_base_index + " << i << "];\n";
 	}
+	vk::vr_insert_depth_remap_fragment_start(OS, m_prog.ctrl, properties.in_register_mask, properties.redirected_sampler_mask); // VR fork: depth remap
 }
 
 void VKFragmentDecompilerThread::insertMainEnd(std::stringstream & OS)
@@ -573,6 +581,8 @@ void VKFragmentDecompilerThread::insertMainEnd(std::stringstream & OS)
 			"	// Insert pseudo-barrier sequence to disable early-Z\n"
 			"	gl_FragDepth = gl_FragCoord.z;\n\n";
 	}
+
+	vk::vr_insert_exact_depth_fragment_end(OS, m_prog.ctrl, vk_prog->output_color_masks, m_prog.mrt_buffers_count); // VR fork: exact depth (a depth export below overrides it; DLSS test: motion)
 
 	glsl::insert_rop(OS, m_shader_props);
 

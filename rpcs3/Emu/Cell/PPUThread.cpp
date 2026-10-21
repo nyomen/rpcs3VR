@@ -1227,6 +1227,8 @@ static void ppu_break(ppu_thread& ppu, ppu_opcode_t, be_t<u32>* this_op, ppu_int
 	return ppu_cache(ppu.cia)(ppu, {*this_op}, this_op, ppu.state ? &ppu_ret : next_fn);
 }
 
+#include "PPUDevHooks.inl" // VR fork: trace and watch breakpoints (development)
+
 // Set or remove breakpoint
 extern bool ppu_breakpoint(u32 addr, bool is_adding)
 {

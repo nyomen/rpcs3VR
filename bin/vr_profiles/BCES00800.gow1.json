@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "title_id": "BCES00800",
+  "app_version": "01.00",
+  "name": "God of War (God of War Collection)",
+  "max_fps": 0,
+  "default_fps": 0,
+  "game_fps_u32": ["0x531dd0"],
+  "game_rate_measured": false,
+  "culling_scale_f32": [
+    { "address": "0x4ccff0", "fov_deg": 32.27, "aspect": 1.7775, "margin_deg": 10, "min": 1.0, "max": 8.0, "mode": "tangent_x", "step": 0.25, "option": "horizontal_view" },
+    { "address": "0x4ccff4", "fov_deg": 32.27, "aspect": 1.7775, "margin_deg": 10, "min": 1.0, "max": 8.0, "mode": "tangent_y", "step": 0.25, "option": "vertical_view" }
+  ],
+
+  "resolution_scaled_constants": [
+    { "program": "c4882b95379447a8", "slots": [466, 467] }
+  ],
+
+  "matrix_layout": "row_vectors",
+  "camera_blocks": [256],
+  "output_aspect_tolerance": 0.02,
+  "display_rect": [32, 18, 1216, 684],
+
+  "camera_position": {
+    "eye_baseline": 0.864
+  },
+
+  "stereo": {
+    "formula": "clip_x_shear",
+    "per_eye_separation": 0.0243067,
+    "convergence": 128.051,
+    "eye_offset": "baseline"
+  },
+
+  "screen_space": {
+    "screen_frame_draws": [
+      { "program": "a3b1455d9ebdd381", "texture": "1024x256" },
+      { "program": "a3b1455d9ebdd381", "texture": "512x512" }
+    ],
+    "offaspect_projection": true,
+    "frames_without_3d_as_screen": true
+  }
+}

@@ -25,7 +25,8 @@ namespace rsx
 			back,
 			next,
 			exit,
-			exit_for_screenshot
+			exit_for_screenshot,
+			exit_menu // close the whole menu, even from inside a settings tab
 		};
 
 		struct home_menu_entry : horizontal_layout
@@ -120,13 +121,25 @@ namespace rsx
 		struct home_menu_dropdown : public home_menu_setting<T, cfg::_enum<T>>
 		{
 		public:
-			home_menu_dropdown(cfg::_enum<T>* setting, const std::string& text)
+			// filter (optional): which of the setting's values (by index) are offered.
+			// relabel (optional): an entry's text from its value index and translated text.
+			home_menu_dropdown(cfg::_enum<T>* setting, const std::string& text, std::function<bool(u32)> filter = {},
+				std::function<std::string(u32, const std::string&)> relabel = {})
 				: home_menu_setting<T, cfg::_enum<T>>(setting, text)
 			{
 				for (size_t index = 0; index < setting->size(); index++)
 				{
+					if (filter && !filter(static_cast<u32>(index)))
+					{
+						continue;
+					}
 					auto translated = g_emu_callbacks.get_localized_setting(home_menu_setting<T, cfg::_enum<T>>::m_setting, static_cast<u32>(index));
+					if (relabel)
+					{
+						translated = relabel(static_cast<u32>(index), translated);
+					}
 					m_options.emplace_back(std::move(translated));
+					m_values.push_back(static_cast<u32>(index));
 				}
 			}
 
@@ -140,19 +153,35 @@ namespace rsx
 
 				const auto current = fmt::format("%s", setting->get());
 				const auto list = setting->to_list();
-				for (s32 index = 0; index < static_cast<s32>(list.size()); ++index)
+				u32 current_index = umax;
+				for (u32 index = 0; index < list.size(); ++index)
 				{
-					if (list[index] != current)
+					if (list[index] == current)
+					{
+						current_index = index;
+						break;
+					}
+				}
+				for (s32 pos = 0; pos < static_cast<s32>(m_values.size()); ++pos)
+				{
+					if (m_values[pos] != current_index)
 					{
 						continue;
 					}
 
-					if (index != m_dropdown->get_selected_index())
+					if (pos != m_dropdown->get_selected_index())
 					{
-						m_dropdown->select_item(index);
+						m_dropdown->select_item(pos);
 					}
 					break;
 				}
+			}
+
+			// The setting's value index of the selected entry.
+			s32 get_selected_value_index() const
+			{
+				const s32 pos = m_dropdown->get_selected_index();
+				return pos >= 0 && pos < static_cast<s32>(m_values.size()) ? static_cast<s32>(m_values[pos]) : pos;
 			}
 
 			void set_size(u16 w, u16 h = element_height) override
@@ -281,6 +310,7 @@ namespace rsx
 
 		private:
 			std::vector<std::string> m_options;
+			std::vector<u32> m_values; // the setting value index of each entry in m_options
 			select* m_dropdown = nullptr;
 
 			int m_previous_selection = -1;

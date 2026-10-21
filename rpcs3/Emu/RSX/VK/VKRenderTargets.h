@@ -18,8 +18,13 @@ namespace vk
 		void dispose(vk::buffer* buf);
 	}
 
-	void resolve_image(vk::command_buffer& cmd, vk::viewable_image* dst, vk::viewable_image* src);
-	void unresolve_image(vk::command_buffer& cmd, vk::viewable_image* dst, vk::viewable_image* src);
+	// VR fork (multiview): layer selects the eye of stereo images; one call per layer.
+	void resolve_image(vk::command_buffer& cmd, vk::viewable_image* dst, vk::viewable_image* src, u32 layer = 0);
+	void unresolve_image(vk::command_buffer& cmd, vk::viewable_image* dst, vk::viewable_image* src, u32 layer = 0);
+
+	// VR fork (multiview): while set, new render targets get two layers (layer 1 = right eye). Set by the
+	// renderer before any surface of a stereo frame is created; the surface cache is invalidated on a change.
+	extern bool g_vr_stereo_layers;
 
 	class image_reference_sync_barrier
 	{
@@ -109,6 +114,8 @@ namespace vk
 		u64 last_rw_access_tag = 0;     // timestamp when this object was last used
 		u64 spill_request_tag = 0;      // timestamp when spilling was requested
 		bool is_bound = false;          // set when the surface is bound for rendering
+		u32 vr_pose = 0;                // VR fork: id of the head pose its 3D content was drawn with, 0 if none
+		bool vr_has_3d = false;         // VR fork: holds camera-draw (3D) content, directly or sampled from it; a full colour clear resets it
 
 		using drawable_surface_t::drawable_surface_t;
 
@@ -268,7 +275,7 @@ namespace vk
 				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 				VK_IMAGE_TYPE_2D,
 				requested_format,
-				static_cast<u32>(width_), static_cast<u32>(height_), 1, 1, 1,
+				static_cast<u32>(width_), static_cast<u32>(height_), 1, 1, vk::g_vr_stereo_layers ? 2u : 1u,
 				static_cast<VkSampleCountFlagBits>(samples),
 				VK_IMAGE_LAYOUT_UNDEFINED,
 				VK_IMAGE_TILING_OPTIMAL,
@@ -277,6 +284,7 @@ namespace vk
 				VMM_ALLOCATION_POOL_SURFACE_CACHE,
 				RSX_FORMAT_CLASS_COLOR);
 
+			rtt->stereo_layers = (rtt->layers() == 2);
 			rtt->set_debug_name(fmt::format("RTV @0x%x, fmt=0x%x", address, static_cast<int>(format)));
 			rtt->change_layout(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
@@ -336,7 +344,7 @@ namespace vk
 				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 				VK_IMAGE_TYPE_2D,
 				requested_format,
-				static_cast<u32>(width_), static_cast<u32>(height_), 1, 1, 1,
+				static_cast<u32>(width_), static_cast<u32>(height_), 1, 1, vk::g_vr_stereo_layers ? 2u : 1u,
 				static_cast<VkSampleCountFlagBits>(samples),
 				VK_IMAGE_LAYOUT_UNDEFINED,
 				VK_IMAGE_TILING_OPTIMAL,
@@ -345,6 +353,7 @@ namespace vk
 				VMM_ALLOCATION_POOL_SURFACE_CACHE,
 				rsx::classify_format(format));
 
+			ds->stereo_layers = (ds->layers() == 2);
 			ds->set_debug_name(fmt::format("DSV @0x%x", address));
 			ds->change_layout(cmd, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
@@ -401,7 +410,7 @@ namespace vk
 					VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 					VK_IMAGE_TYPE_2D,
 					ref->format(),
-					new_w, new_h, 1, 1, 1,
+					new_w, new_h, 1, 1, ref->layers(),
 					static_cast<VkSampleCountFlagBits>(ref->samples()),
 					VK_IMAGE_LAYOUT_UNDEFINED,
 					VK_IMAGE_TILING_OPTIMAL,
@@ -415,6 +424,7 @@ namespace vk
 			if (initialize)
 			{
 				sink->reset();
+				sink->stereo_layers = ref->stereo_layers;
 				sink->msaa_flags = rsx::surface_state_flags::ready;
 				sink->add_ref();
 
@@ -755,5 +765,28 @@ namespace vk
 		bool can_collapse_surface(const std::unique_ptr<vk::render_target>& surface, rsx::problem_severity severity) override;
 		bool handle_memory_pressure(vk::command_buffer& cmd, rsx::problem_severity severity) override;
 		void trim(vk::command_buffer& cmd, rsx::problem_severity memory_pressure);
+
+		// VR fork: the most recently used colour surface holding this address with
+		// this pitch, or null (the right-eye blit mirror's lookup).
+		vk::render_target* find_color_surface(u32 address, u32 pitch)
+		{
+			const auto range = utils::address_range32::start_length(address, 1);
+			if (!m_render_targets_memory_range.valid() || !range.overlaps(m_render_targets_memory_range))
+			{
+				return nullptr;
+			}
+
+			vk::render_target* best = nullptr;
+			for (auto it = m_render_targets_storage.begin_range(range); it != m_render_targets_storage.end(); ++it)
+			{
+				vk::render_target* surface = vk::surface_cache_traits::get(it->second);
+				if (surface->get_rsx_pitch() == pitch && surface->get_memory_range().overlaps(range) &&
+					(!best || surface->last_use_tag > best->last_use_tag))
+				{
+					best = surface;
+				}
+			}
+			return best;
+		}
 	};
 }

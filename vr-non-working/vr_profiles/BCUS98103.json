@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "title_id": "BCUS98103",
+  "app_version": "01.10",
+  "name": "Uncharted: Drake's Fortune™",
+  "max_fps": 0,
+  "default_fps": 45,
+  "vblanks_per_frame": 2,
+  "video_vblank_rate": 60,
+  "boosted_targets": [{ "size": "2432x1216", "depth_only": true, "scale": 2.0 }],
+  "scaled_camera_blocks": true,
+  "zcull_no_wait": true,
+  "fragment_camera_rows": [
+    { "program": "292d56e8bfecaf63", "fragment": "59c0ac681f999e51", "rows": [69, 73, 72], "from_camera": true, "eye_position": 52 },
+    { "program": "fc15ec0752d20290", "fragment": "9fe5ec00ef1c6d6f", "ray": 5, "view_vector": 13 }
+  ],
+  "fragment_constant_overrides": [
+    { "program": "fc15ec0752d20290", "fragment": "135614811b7e2009", "constant": 19, "inverse_fit_words": { "x": "0x7cdd88", "y": "0x7cdd8c", "fov_deg": 46.7, "aspect": 1.7778 } }
+  ],
+  "late_readback_lengths": [64],
+  "depth_remap_programs": [{ "program": "fc15ec0752d20290", "texture0": "1280x720", "texture0_format": "a5" }],
+  "depth_remap_uv": true,
+  "depth_remap_packed_unit": 0,
+  "culling_scale_f32": [
+    { "address": "0x7cdd80", "fov_deg": 46.7, "aspect": 1.7778, "margin_deg": 3, "min": 1.0, "max": 6.0, "lead_s": 0.1, "mode": "tangent_x", "option": "horizontal_view" },
+    { "address": "0x7cdd84", "fov_deg": 46.7, "aspect": 1.7778, "margin_deg": 3, "min": 1.0, "max": 6.0, "lead_s": 0.1, "mode": "tangent_y", "option": "vertical_view" },
+    { "address": "0x7cdd88", "fov_deg": 46.7, "aspect": 1.7778, "margin_deg": 3, "min": 1.0, "max": 6.0, "step": 1.0, "hold_s": 1.0, "lead_s": 0.1, "mode": "tangent_x", "option": "shadow_coverage" },
+    { "address": "0x7cdd8c", "fov_deg": 46.7, "aspect": 1.7778, "margin_deg": 3, "min": 1.0, "max": 6.0, "step": 1.0, "hold_s": 1.0, "lead_s": 0.1, "mode": "tangent_y", "option": "shadow_coverage" }
+  ],
+
+  "head_aim": { "button": "L1", "mode": "gaze", "return_deg_per_s": 180, "direct": { "address": "0x11eff10", "yaw_sign": -1, "pitch_sign": -1 } },
+  "matrix_layout": "column_vectors",
+  "camera_blocks": [0, 16, 256],
+  "output_aspect_tolerance": 0.02,
+
+  "camera_position": {
+    "slot": 20,
+    "eye_baseline": 0.064
+  },
+
+  "stereo": {
+    "formula": "clip_x_shear",
+    "per_eye_separation": 0.0162903,
+    "convergence": 2.56,
+    "eye_offset": "baseline_per_w"
+  },
+
+  "screen_space": {
+    "passthrough_hud": true,
+    "scaled_draws": [{ "program": "ae47d5452ce87794", "texture": "32x32", "texture_unit": 1, "depth": 10 }]
+  }
+}

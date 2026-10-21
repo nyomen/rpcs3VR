@@ -58,6 +58,7 @@
 #include <deque>
 #include <thread>
 #include "util/tsc.hpp"
+#include "Emu/RSX/Capture/rsx_vr_hooks.h" // VR fork
 #include "util/sysinfo.hpp"
 #include "util/init_mutex.hpp"
 #include "util/cctype.hpp"
@@ -1320,6 +1321,7 @@ extern void ppu_execute_syscall(ppu_thread& ppu, u64 code)
 
 		if (const auto func = g_ppu_syscall_table[code].first)
 		{
+			const rsx::vr::dev::syscall_profile_scope vr_prof{ ppu, code }; // VR fork: RPCS3_SYSCALL_PROFILE (development)
 			func(ppu, {}, vm::_ptr<u32>(ppu.cia), nullptr);
 			ppu_log.trace("Syscall '%s' (%llu) finished, r3=0x%llx", ppu_syscall_code(code), code, ppu.gpr[3]);
 			return;

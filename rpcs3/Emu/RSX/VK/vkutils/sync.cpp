@@ -11,6 +11,7 @@
 #include "util/sysinfo.hpp"
 #include "util/asm.hpp"
 #include "util/logs.hpp"
+#include "Emu/RSX/Capture/rsx_vr_hooks.h" // VR fork: wait accounting
 
 namespace vk
 {
@@ -264,6 +265,7 @@ namespace vk
 		const auto image_memory_barriers = v1_utils::get_image_memory_barriers(dependency);
 		const auto buffer_memory_barriers = v1_utils::get_buffer_memory_barriers(dependency);
 
+		vk::vr_barrier_census(); // VR fork: dev barrier census (RPCS3_VR_BARRIER_CENSUS)
 		vkCmdPipelineBarrier(cmd, src_stages, dst_stages, dependency.dependencyFlags,
 			::size32(memory_barriers), memory_barriers.data(),
 			::size32(buffer_memory_barriers), buffer_memory_barriers.data(),
@@ -469,6 +471,7 @@ namespace vk
 			barrier.dstAccessMask |= VK_ACCESS_TRANSFER_WRITE_BIT;
 		}
 
+		vk::vr_barrier_census(); // VR fork: dev barrier census (RPCS3_VR_BARRIER_CENSUS)
 		vkCmdPipelineBarrier(cmd, src_stages, dst_stages, dependency.dependencyFlags,
 			::size32(memory_barriers), memory_barriers.data(),
 			::size32(buffer_memory_barriers), buffer_memory_barriers.data(),
@@ -562,6 +565,7 @@ namespace vk
 
 	VkResult wait_for_fence(fence* pFence, u64 timeout)
 	{
+		const rsx::vr::rsx_wait_scope _wait(rsx::vr::rsx_wait::gpu_fence); // VR fork: wait accounting
 		pFence->wait_flush();
 
 		if (timeout)

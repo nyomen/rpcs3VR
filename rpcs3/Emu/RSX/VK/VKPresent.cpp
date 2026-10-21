@@ -80,8 +80,11 @@ bool VKGSRender::reinitialize_swapchain()
 	// Discard the current upscaling pipeline if any
 	m_upscaler.reset();
 
-	// Drain all the queues
+	// Drain all the queues. The OpenXR frame thread may be submitting, and
+	// vkDeviceWaitIdle requires every queue to be externally synchronized.
+	vr_lock_queues(); // VR fork: RPCS3's and the OpenXR queue
 	vkDeviceWaitIdle(*m_device);
+	vr_unlock_queues(); // VR fork
 
 	// Clean the FBO caches
 	for (u32 i = 0; i < m_swapchain->get_swap_image_count(); ++i)
@@ -244,6 +247,7 @@ void VKGSRender::queue_swap_request()
 void VKGSRender::frame_context_cleanup(vk::frame_context_t *ctx)
 {
 	ensure(ctx->swap_command_buffer);
+	const gpuprof_timer vr_wait_timer{ this, &VKGSRender::m_gpuprof_ctxwait_ms }; // VR fork: dev GPU profiler
 
 	// Perform hard swap here
 	if (ctx->swap_command_buffer->wait(FRAME_PRESENT_TIMEOUT) != VK_SUCCESS)
@@ -265,6 +269,7 @@ void VKGSRender::frame_context_cleanup(vk::frame_context_t *ctx)
 			for (const auto& view : m_overlay_manager->get_dirty())
 			{
 				ui_renderer->remove_temp_resources(view->uid);
+				vr_remove_overlay_temp_resources(view->uid); // VR fork
 				uids_to_dispose.push_back(view->uid);
 			}
 
@@ -424,6 +429,9 @@ vk::viewable_image* VKGSRender::get_present_source(/* inout */ vk::present_surfa
 
 void VKGSRender::flip(const rsx::display_flip_info_t& info)
 {
+	const gpuprof_timer vr_flip_timer{ this, &VKGSRender::m_gpuprof_flip_ms }; // VR fork: dev GPU profiler
+	vr_flip_begin(info); // VR fork: pending right-eye batch, RPCS3_VR_RTDUMP, GPU profiler
+
 	// Check swapchain condition/status
 	if (!m_swapchain->supports_automatic_wm_reports())
 	{
@@ -539,9 +547,13 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 			buffer_pitch = buffer_width * 4;
 	}
 
+	// VR fork: the previous flip's display-buffer uploads are no longer read.
+	m_texture_cache.release_flip_uploads();
+
 	// Scan memory for required data. This is done early to optimize waiting for the driver image acquire below.
 	vk::viewable_image* image_to_flip = nullptr;
 	vk::viewable_image* image_to_flip2 = nullptr;
+	bool generated_stereo = false; // VR fork: image_to_flip2 is the right eye of the fork's own stereo
 
 	if (info.buffer < display_buffers_count && buffer_width && buffer_height)
 	{
@@ -555,6 +567,7 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 			.eye = 0
 		};
 		image_to_flip = get_present_source(&present_info, avconfig);
+		generated_stereo = vr_present_right_eye(present_info, avconfig, buffer_width, buffer_height, image_to_flip, image_to_flip2); // VR fork
 
 		if (avconfig.stereo_enabled) [[unlikely]]
 		{
@@ -586,6 +599,8 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 	{
 		evaluate_cpu_usage_reduction_limits();
 	}
+
+	vr_publish_frame(info, avconfig, image_to_flip, image_to_flip2, generated_stereo, buffer_width, buffer_height); // VR fork: the headset's frame and overlay (DLSS test: the image through DLSS first)
 
 	// Prepare surface for new frame. Set no timeout here so that we wait for the next image if need be
 	ensure(m_current_frame->present_image == umax);
@@ -645,6 +660,7 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 	{
 		aspect_ratio = { 0, 0, s32(m_swapchain_dims.width), s32(m_swapchain_dims.height) };
 	}
+	vr_mirror_region(aspect_ratio, generated_stereo); // VR fork: both eyes side by side at the shape the headset shows
 
 	// Blit contents to screen..
 	VkImage target_image = m_swapchain->get_image(m_current_frame->present_image);
@@ -680,16 +696,19 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 
 	// WARNING: We have to do this here. We cannot touch the acquired image on the CB and then do a hard sync on it before it is submitted to the presentation engine.
 	// That introduces a WRITE_AFTER_PRESENT (from the previous present) when we later try to present on a different CB
-	if (image_to_flip && need_media_capture)
+	if (image_to_flip && need_media_capture && vr_capturable(image_to_flip, buffer_width, buffer_height)) // VR fork: skips an image the copy cannot read
 	{
-		const usz sshot_size = buffer_height * buffer_width * 4;
+		// VR fork: a screenshot while generated stereo is shown holds both eyes side by side.
+		const bool sbs_shot = user_asked_for_screenshot && generated_stereo && vr_side_by_side_shot(image_to_flip, image_to_flip2, buffer_width, buffer_height);
+		const u32 shot_width = sbs_shot ? buffer_width * 2 : buffer_width;
+		const usz sshot_size = buffer_height * shot_width * 4;
 
 		vk::buffer sshot_vkbuf(*m_device, utils::align(sshot_size, 0x100000), m_device->get_memory_mapping().host_visible_coherent,
 			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, VK_BUFFER_USAGE_TRANSFER_DST_BIT, 0, VMM_ALLOCATION_POOL_UNDEFINED);
 
 		VkBufferImageCopy copy_info{};
 		copy_info.bufferOffset = 0;
-		copy_info.bufferRowLength = 0;
+		copy_info.bufferRowLength = shot_width; // VR fork
 		copy_info.bufferImageHeight = 0;
 		copy_info.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		copy_info.imageSubresource.baseArrayLayer = 0;
@@ -704,7 +723,7 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 
 		vk::image* image_to_copy = image_to_flip;
 
-		if (g_cfg.video.record_with_overlays && has_overlay)
+		if (g_cfg.video.record_with_overlays && has_overlay && !sbs_shot) // VR fork
 		{
 			const auto key = vk::get_renderpass_key(m_swapchain->get_surface_format());
 			single_target_pass = vk::get_renderpass(*m_device, key);
@@ -752,6 +771,14 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 		vk::copy_image_to_buffer(*m_current_command_buffer, image_to_copy, &sshot_vkbuf, copy_info);
 		image_to_copy->pop_layout(*m_current_command_buffer);
 
+		if (sbs_shot) // VR fork: the right eye into the second half of each row
+		{
+			copy_info.bufferOffset = buffer_width * 4;
+			image_to_flip2->push_layout(*m_current_command_buffer, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+			vk::copy_image_to_buffer(*m_current_command_buffer, image_to_flip2, &sshot_vkbuf, copy_info);
+			image_to_flip2->pop_layout(*m_current_command_buffer);
+		}
+
 		flush_command_queue(true);
 		const auto src = sshot_vkbuf.map(0, sshot_size);
 		std::vector<u8> sshot_frame(sshot_size);
@@ -762,7 +789,7 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 
 		if (user_asked_for_screenshot)
 		{
-			m_frame->take_screenshot(std::move(sshot_frame), buffer_width, buffer_height, is_bgra);
+			m_frame->take_screenshot(std::move(sshot_frame), shot_width, buffer_height, is_bgra); // VR fork
 		}
 		else
 		{
@@ -817,12 +844,13 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 	{
 		const bool use_full_rgb_range_output = g_cfg.video.full_rgb_range_output.get();
 
-		if (!use_full_rgb_range_output || !rsx::fcmp(avconfig.gamma, 1.f) || avconfig.stereo_enabled) [[unlikely]]
+		if (!use_full_rgb_range_output || !rsx::fcmp(avconfig.gamma, 1.f) || avconfig.stereo_enabled || generated_stereo) [[unlikely]] // VR fork
 		{
 			if (image_to_flip) calibration_src.push_back(image_to_flip);
 			if (image_to_flip2) calibration_src.push_back(image_to_flip2);
+			if (generated_stereo) vr_crop_for_side_by_side(calibration_src, buffer_width, buffer_height); // VR fork
 
-			if (m_output_scaling == output_scaling_mode::fsr && !avconfig.stereo_enabled) // 3D will be implemented later
+			if (m_output_scaling == output_scaling_mode::fsr && !avconfig.stereo_enabled && !generated_stereo) // 3D will be implemented later (VR fork: nor for its stereo)
 			{
 				// Run upscaling pass before the rest of the output effects pipeline
 				// This can be done with all upscalers but we already get bilinear upscaling for free if we just out the filters directly
@@ -853,7 +881,8 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 
 			vk::get_overlay_pass<vk::video_out_calibration_pass>()->run(
 				*m_current_command_buffer, areau(aspect_ratio), direct_fbo, calibration_src,
-				avconfig.gamma, !use_full_rgb_range_output, avconfig.stereo_enabled, single_target_pass);
+				avconfig.gamma, !use_full_rgb_range_output, avconfig.stereo_enabled || generated_stereo,
+				single_target_pass, generated_stereo); // VR fork: side by side
 
 			direct_fbo->release();
 		}
@@ -982,8 +1011,9 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 	// Data sync
 	const rsx::surface_scaling_config_t active_res_scaling_config =
 	{
-		.scale_percent = static_cast<u16>(g_cfg.video.resolution_scale_percent),
-		.min_scalable_dimension = static_cast<u16>(g_cfg.video.min_scalable_dimension),
+		.scale_percent = rsx::vr::eye_shape_percent_x(vr_resolution_scale(static_cast<u16>(g_cfg.video.resolution_scale_percent))), // VR fork: profile reduced_scale_frames, headset-shaped eyes
+		.min_scalable_dimension = rsx::vr::min_scalable_dimension(static_cast<u16>(g_cfg.video.min_scalable_dimension)), // VR fork: profile min_scalable_dimension
+		.scale_percent_y = rsx::vr::eye_shape_percent_y(vr_resolution_scale(static_cast<u16>(g_cfg.video.resolution_scale_percent))), // VR fork: headset-shaped eyes
 	};
 
 	if (active_res_scaling_config != this->resolution_scaling_config)
@@ -997,6 +1027,7 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 
 		// Then apply the change
 		m_rtts.sync_scaling_config(*m_current_command_buffer, active_res_scaling_config);
+		m_vr_right_rtts.sync_scaling_config(*m_current_command_buffer, active_res_scaling_config); // VR fork
 		this->resolution_scaling_config = active_res_scaling_config;
 
 		// Finally reclaim any unused resources

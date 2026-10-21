@@ -492,6 +492,11 @@
     <ClCompile Include="Emu\Io\usb_vfs.cpp" />
     <ClCompile Include="Emu\RSX\Capture\rsx_capture.cpp" />
     <ClCompile Include="Emu\RSX\Capture\rsx_replay.cpp" />
+    <ClCompile Include="Emu\RSX\Capture\rsx_stereo_inspector.cpp" />
+    <ClCompile Include="Emu\RSX\Capture\rsx_camera_probe.cpp" />
+    <ClCompile Include="Emu\RSX\Capture\rsx_vr_profile_generator.cpp" />
+    <ClCompile Include="Emu\RSX\Capture\rsx_vr_hooks.cpp" />
+    <ClCompile Include="Emu\RSX\Capture\rsx_vr_eye_shape.cpp" />
     <ClCompile Include="Emu\RSX\Program\CgBinaryProgram.cpp" />
     <ClCompile Include="Emu\RSX\Program\CgBinaryFragmentProgram.cpp" />
     <ClCompile Include="Emu\RSX\Program\CgBinaryVertexProgram.cpp" />
@@ -556,6 +561,7 @@
     <ClCompile Include="Emu\Cell\PPUThread.cpp" />
     <ClCompile Include="Emu\Cell\RawSPUThread.cpp" />
     <ClCompile Include="Emu\Cell\SPUCommonRecompiler.cpp" />
+    <ClCompile Include="Emu\Cell\SPUAsyncCompile.cpp" />
     <ClCompile Include="Emu\Cell\SPULLVMRecompiler.cpp" />
     <ClCompile Include="Emu\Cell\SPUThread.cpp" />
     <ClCompile Include="Emu\CPU\CPUThread.cpp" />
@@ -1020,6 +1026,7 @@
     <ClInclude Include="Emu\Cell\SPUAnalyser.h" />
     <ClInclude Include="Emu\Cell\SPUASMJITRecompiler.h" />
     <ClInclude Include="Emu\Cell\SPUDisAsm.h" />
+    <ClInclude Include="Emu\Cell\SPUAsyncCompile.h" />
     <ClInclude Include="Emu\Cell\SPUInterpreter.h" />
     <ClInclude Include="Emu\Cell\SPUOpcodes.h" />
     <ClInclude Include="Emu\Cell\SPURecompiler.h" />
@@ -1029,6 +1036,13 @@
     <ClInclude Include="Emu\CPU\CPUThread.h" />
     <ClInclude Include="Emu\RSX\Capture\rsx_capture.h" />
     <ClInclude Include="Emu\RSX\Capture\rsx_replay.h" />
+    <ClInclude Include="Emu\RSX\Capture\rsx_stereo_inspector.h" />
+    <ClInclude Include="Emu\RSX\Capture\rsx_camera_probe.h" />
+    <ClInclude Include="Emu\RSX\Capture\rsx_vr_profile_generator.h" />
+    <ClInclude Include="Emu\RSX\Capture\rsx_vr_hooks.h" />
+    <ClInclude Include="Emu\RSX\Capture\rsx_vr_texture_gather.h" />
+    <ClInclude Include="Emu\RSX\Capture\rsx_vr_eye_shape.h" />
+    <ClInclude Include="Emu\Cell\PPUDevHooks.inl" />
     <ClInclude Include="Emu\RSX\Capture\rsx_trace.h" />
     <ClInclude Include="Emu\RSX\Program\GLSLCommon.h" />
     <ClInclude Include="Emu\RSX\Common\surface_utils.h" />

@@ -386,3 +386,63 @@ enum class vsync_mode
 	adaptive,
 	full,
 };
+
+// VR fork: the game's frame rate in VR (the vblank follows it). Default = the VR profile's default_fps.
+enum class vr_frame_rate
+{
+	profile_default,
+	fps_30,
+	fps_45, // half of 90 Hz: one game frame per frame-generation pair (OFXR Bridge)
+	fps_60,
+	fps_72,
+	fps_75,
+	fps_80,
+	fps_90,
+	fps_120,
+	fps_144,
+	unlimited, // the headset's refresh rate
+};
+
+// VR fork: the scenes a VR profile marks as cinematic (reduced_scale_frames: Gran Turismo 5's pre-race views).
+enum class vr_cinematic_scenes
+{
+	fixed_screen,     // the profile's reduced Resolution Scale, on the fixed screen with the game's own camera
+	full_quality,     // the configured Resolution Scale, in the headset view
+};
+
+// VR fork, DLSS test branch: the DLSS mode (VKDLSS.cpp; env RPCS3_DLSS overrides) and the NGX render preset it uses.
+enum class vr_dlss_mode
+{
+	off,
+	dlaa,
+	quality,
+	balanced,
+	performance,
+	ultra_performance,
+};
+
+enum class vr_dlss_model
+{
+	default_model, // NGX's choice per mode (K for DLAA, Quality and Balanced; M for Performance; L for Ultra Performance)
+	e,             // convolutional (deprecated by NVIDIA): far cheaper
+	f,
+	j,             // transformer
+	k,
+	l,
+	m,
+};
+
+// VR fork (framegen): DLSS Frame Generation's frame-rate multiplier.
+enum class vr_framegen_multiplier
+{
+	x2, // one generated frame per rendered frame
+	x3, // two (DLSS multi-frame generation, RTX 50)
+};
+
+// VR fork (framegen): where DLSS Frame Generation's motion comes from.
+enum class vr_framegen_motion
+{
+	hybrid, // the game's motion vectors where a depth check says the pixel is static world, DLSS-G's own estimate elsewhere
+	game,   // the game's motion vectors everywhere
+};
+

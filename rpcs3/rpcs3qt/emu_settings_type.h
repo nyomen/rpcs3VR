@@ -238,6 +238,35 @@ enum class emu_settings_type
 
 	// Log
 	Log,
+
+	// VR fork
+	VREnabled,
+	VRHudFixed,
+	VRFixedScreen,
+	VRFrameRate,
+	VRCinematicScenes,
+	VRDlss,                   // VR fork, DLSS test branch
+	VRDlssModel,
+	VRDlssSharpening,         // VR fork
+	VRFrameGeneration,        // VR fork, framegen
+	VRFrameGenMultiplier,
+	VRFrameGenMotion,
+	VRHighestDetailModels,    // VR fork: game options (rules tagged "option" in the VR profile)
+	VRReducedRateReflections,
+	VRReducedRateMirror,
+	VRSimplerDistantCars,
+	VRSimplerVehicles,
+	VRFewerShadows,
+	VRHeadAim,
+	VRScreenDepth,
+	VRHudScale,
+	VRHudOffsetX,
+	VRHudOffsetY,
+	VRCameraX,
+	VRCameraY,
+	VRCameraDepth,            // Camera Z Offset
+	VRWorldScale,
+	VRReprojectionMargin,
 };
 
 /** A helper map that keeps track of where a given setting type is located*/

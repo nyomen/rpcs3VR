@@ -109,6 +109,8 @@ namespace vk
 		void free_resources();
 
 		vk::framebuffer* get_framebuffer(vk::image* target, VkRenderPass render_pass);
+		u8 m_target_layer = 0;     // VR fork: the layer of a stereo target this pass renders into ...
+		u8 m_target_view_mask = 0; // ... or the multiview variant of render_pass (both layers at once)
 
 		virtual void emit_geometry(vk::command_buffer& cmd, glsl::program* program);
 
@@ -240,7 +242,7 @@ namespace vk
 
 		void run(vk::command_buffer& cmd, const areau& viewport, vk::framebuffer* target,
 			const rsx::simple_array<vk::viewable_image*>& src, f32 gamma, bool limited_rgb,
-			bool stereo_enabled, VkRenderPass render_pass);
+			bool stereo_enabled, VkRenderPass render_pass, bool force_side_by_side = false); // VR fork: generated stereo is always side by side
 	};
 
 	// TODO: Replace with a proper manager

@@ -251,4 +251,33 @@ const std::map<emu_settings_type, cfg_location> settings_location =
 
 	// Logs
 	{ emu_settings_type::Log, get_cfg_location(local_cfg.log)},
+
+	// VR fork
+	{ emu_settings_type::VREnabled,                  get_cfg_location(local_cfg.video.vr.enabled) },
+	{ emu_settings_type::VRHudFixed,                 get_cfg_location(local_cfg.video.vr.hud_fixed) },
+	{ emu_settings_type::VRFixedScreen,              get_cfg_location(local_cfg.video.vr.fixed_screen) },
+	{ emu_settings_type::VRFrameRate,                get_cfg_location(local_cfg.video.vr.frame_rate) },
+	{ emu_settings_type::VRCinematicScenes,          get_cfg_location(local_cfg.video.vr.cinematic_scenes) },
+	{ emu_settings_type::VRDlss,                     get_cfg_location(local_cfg.video.vr.dlss) },
+	{ emu_settings_type::VRDlssModel,                get_cfg_location(local_cfg.video.vr.dlss_model) },
+	{ emu_settings_type::VRDlssSharpening,           get_cfg_location(local_cfg.video.vr.dlss_sharpening) },
+	{ emu_settings_type::VRFrameGeneration,          get_cfg_location(local_cfg.video.vr.frame_generation) },
+	{ emu_settings_type::VRFrameGenMultiplier,       get_cfg_location(local_cfg.video.vr.frame_generation_multiplier) },
+	{ emu_settings_type::VRFrameGenMotion,           get_cfg_location(local_cfg.video.vr.frame_generation_motion) },
+	{ emu_settings_type::VRHighestDetailModels,      get_cfg_location(local_cfg.video.vr.highest_detail_models) },
+	{ emu_settings_type::VRReducedRateReflections,   get_cfg_location(local_cfg.video.vr.reduced_rate_reflections) },
+	{ emu_settings_type::VRReducedRateMirror,        get_cfg_location(local_cfg.video.vr.reduced_rate_mirror) },
+	{ emu_settings_type::VRSimplerDistantCars,       get_cfg_location(local_cfg.video.vr.simpler_distant_cars) },
+	{ emu_settings_type::VRSimplerVehicles,          get_cfg_location(local_cfg.video.vr.simpler_vehicles) },
+	{ emu_settings_type::VRFewerShadows,             get_cfg_location(local_cfg.video.vr.fewer_shadows) },
+	{ emu_settings_type::VRHeadAim,                  get_cfg_location(local_cfg.video.vr.head_aim) },
+	{ emu_settings_type::VRScreenDepth,              get_cfg_location(local_cfg.video.vr.screen_depth) },
+	{ emu_settings_type::VRHudScale,                 get_cfg_location(local_cfg.video.vr.hud_scale) },
+	{ emu_settings_type::VRHudOffsetX,               get_cfg_location(local_cfg.video.vr.hud_offset_x) },
+	{ emu_settings_type::VRHudOffsetY,               get_cfg_location(local_cfg.video.vr.hud_offset_y) },
+	{ emu_settings_type::VRCameraX,                  get_cfg_location(local_cfg.video.vr.camera_x) },
+	{ emu_settings_type::VRCameraY,                  get_cfg_location(local_cfg.video.vr.camera_y) },
+	{ emu_settings_type::VRCameraDepth,              get_cfg_location(local_cfg.video.vr.camera_z) },
+	{ emu_settings_type::VRWorldScale,               get_cfg_location(local_cfg.video.vr.world_scale) },
+	{ emu_settings_type::VRReprojectionMargin,       get_cfg_location(local_cfg.video.vr.reprojection_margin) },
 };

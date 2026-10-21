@@ -252,6 +252,48 @@ struct cfg_root : cfg::node
 
 		} custom_anaglyph_matrices{ this };
 
+		// VR fork: stereo rendering and OpenXR headset output.
+		struct node_vr : cfg::node
+		{
+			node_vr(cfg::node* _this) : cfg::node(_this, "VR") {}
+
+			cfg::_bool enabled{ this, "Enabled", true }; // only acts for games with a VR profile
+			cfg::_bool hud_fixed{ this, "HUD Fixed In Front", true, true };
+			cfg::_bool fixed_screen{ this, "Fixed Screen", false, true }; // flat stereo window placed by the HUD settings
+			cfg::uint<0, 200> screen_depth{ this, "Screen 3D Depth", 100, true };      // % of the automatic fixed-screen stereo strength
+			cfg::uint<10, 200> hud_scale{ this, "HUD Scale", 65, true };
+			cfg::uint<0, 3000> hud_depth{ this, "HUD Depth", 0, true };                    // centimetres from the eyes to the HUD box (and the fixed screen); its apparent size stays. 0 = Auto: the VR profile's hud_depth, else 2 m. At least 1 m (the head position term can put a nearer box behind the viewer)
+			cfg::_int<-100, 100> hud_offset_x{ this, "HUD Horizontal Offset", 0, true }; // % of the central view half-width, + is right
+			cfg::_int<-100, 100> hud_offset_y{ this, "HUD Vertical Offset", 0, true };   // % of the central view half-height, + is up
+			cfg::_int<-2000, 2000> camera_x{ this, "Camera X Offset", 0, true };   // hundredths of a metre, + moves the viewpoint right
+			cfg::_int<-2000, 2000> camera_y{ this, "Camera Y Offset", 0, true };   // hundredths of a metre, + up
+			cfg::_int<-2000, 2000> camera_z{ this, "Camera Z Offset", 0, true };   // hundredths of a metre, + forward
+			cfg::_enum<vr_frame_rate> frame_rate{ this, "Frame Rate", vr_frame_rate::profile_default, true }; // the game's frame rate in VR, up to the VR profile's max_fps; the vblank follows it
+			cfg::uint<25, 1000> world_scale{ this, "World Scale", 100, true }; // % apparent size of the game world; corrects the profile's eye_baseline
+			cfg::_int<-1, 30> reprojection_margin{ this, "Reprojection Margin", -1, true }; // degrees rendered beyond each edge of the eye view, so the headset can turn an older frame without black edges; -1 = Auto (10 below the headset's refresh rate)
+			cfg::_enum<vr_cinematic_scenes> cinematic_scenes{ this, "Cinematic Scenes", vr_cinematic_scenes::fixed_screen, true }; // scenes the VR profile marks as cinematic (GT5's pre-race views)
+			cfg::_bool eye_shape{ this, "Headset Eye Shape", true, true }; // each eye rendered at the headset view's shape: the axis with more pixels per degree drops to the other's (fewer pixels, same detail; rsx_vr_eye_shape.h)
+			// Performance options a VR profile can offer (its rules tagged "option"); shown in the home menu for those games only.
+			cfg::_bool reduced_rate_reflections{ this, "Reduced-Rate Reflections", true, true }; // "reflections": reflection maps redrawn in turns
+			cfg::_bool reduced_rate_mirror{ this, "Reduced-Rate Mirror", true, true };           // "mirror": the rear-view mirror redrawn every other frame
+			cfg::_bool simpler_distant_cars{ this, "Simpler Distant Cars", false, true };         // "distant_cars": car_draw_limit
+			cfg::_bool highest_detail_models{ this, "Highest Detail Models", true, true };       // VR fork: "highest_detail": option_f32 (MotorStorm's LOD)
+			cfg::_bool simpler_vehicles{ this, "Simpler Other Vehicles", true, true };           // VR fork: "simpler_vehicles": option_f32
+			cfg::_bool fewer_shadows{ this, "Fewer Shadows", true, true };                       // VR fork: "fewer_shadows": option_f32
+			cfg::_bool head_aim{ this, "Head Aim", true, true };                                 // VR fork: "head_aim": the profile's head_aim (aim with the head while its button is held)
+			cfg::uint<50, 500> head_aim_speed{ this, "Head Aim Speed", 100, true };              // VR fork: % of the profile's head_aim gain (200: the aim turns twice as far as the head)
+			cfg::uint<0, 100> vertical_view{ this, "Vertical View", 100, true };                 // VR fork: "vertical_view": % of the extra vertical culling the headset needs (100 = no missing scenery up / down)
+			cfg::uint<0, 100> horizontal_view{ this, "Horizontal View", 100, true };             // VR fork: "horizontal_view": the same for the horizontal culling (left / right)
+			cfg::uint<0, 100> shadow_coverage{ this, "Shadow Coverage", 100, true };             // VR fork: "shadow_coverage": % of the headset view the sun shadows are fitted to (lower = sharper, steadier shadows; edges can lose shadow)
+			cfg::_enum<vr_dlss_mode> dlss{ this, "DLSS (experimental)", vr_dlss_mode::off, true };         // VR fork: DLSS (env RPCS3_DLSS overrides); live
+			cfg::_enum<vr_dlss_model> dlss_model{ this, "DLSS Model (experimental)", vr_dlss_model::default_model, true }; // the NGX render preset (env RPCS3_DLSS_PRESET overrides); live
+			cfg::uint<0, 100> dlss_sharpening{ this, "DLSS Sharpening", 0, true }; // VR fork: RCAS on DLSS's outputs, 0 = off; live
+			cfg::_bool frame_generation{ this, "DLSS Frame Generation (experimental)", false, true }; // VR fork (framegen): NGX DLSS-G, 2x; needs DLSS on at boot; live (env RPCS3_DLSSG=1/0 overrides)
+			cfg::_enum<vr_framegen_multiplier> frame_generation_multiplier{ this, "DLSS Frame Generation Multiplier", vr_framegen_multiplier::x2, true }; // VR fork (framegen): live
+			cfg::_enum<vr_framegen_motion> frame_generation_motion{ this, "DLSS Frame Generation Motion", vr_framegen_motion::hybrid, true }; // VR fork (framegen): live
+
+		} vr{ this };
+
 	} video{ this };
 
 	struct node_audio : cfg::node

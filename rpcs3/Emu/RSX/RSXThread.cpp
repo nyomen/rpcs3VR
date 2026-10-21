@@ -2,6 +2,7 @@
 #include "RSXThread.h"
 
 #include "Capture/rsx_capture.h"
+#include "Capture/rsx_vr_hooks.h" // VR fork
 #include "Common/surface_store.h"
 #include "Core/RSXReservationLock.hpp"
 #include "Core/RSXEngLock.hpp"
@@ -1084,6 +1085,7 @@ namespace rsx
 
 		rsx::overlays::reset_performance_overlay();
 		rsx::overlays::reset_debug_overlay();
+		rsx::vr::on_boot(); // VR fork: a new boot; drop the previous game's per-frame profile cache
 
 		if (!is_initialized)
 		{
@@ -1147,8 +1149,9 @@ namespace rsx
 
 		resolution_scaling_config =
 		{
-			.scale_percent = static_cast<u16>(g_cfg.video.resolution_scale_percent),
-			.min_scalable_dimension = static_cast<u16>(g_cfg.video.min_scalable_dimension),
+			.scale_percent = rsx::vr::eye_shape_percent_x(static_cast<u16>(g_cfg.video.resolution_scale_percent)), // VR fork: headset-shaped eyes
+			.min_scalable_dimension = rsx::vr::min_scalable_dimension(static_cast<u16>(g_cfg.video.min_scalable_dimension)), // VR fork: as flip() sets it
+			.scale_percent_y = rsx::vr::eye_shape_percent_y(static_cast<u16>(g_cfg.video.resolution_scale_percent)), // VR fork: headset-shaped eyes
 		};
 
 		last_guest_flip_timestamp = get_system_time() - 1000000;
@@ -1157,7 +1160,7 @@ namespace rsx
 
 		if (serialized)
 		{
-			fifo_ctrl->restore_state(restore_fifo_cmd, restore_fifo_count, restore_fifo_position);
+			fifo_ctrl->restore_state(restore_fifo_cmd, restore_fifo_count, restore_fifo_position + (restore_fifo_count ? 0 : 4)); // VR fork: saved between commands, the position is the next command's (restore_state steps back 4 only to resume one)
 		}
 
 		if (!send_event(0, event_flags, 0))
@@ -1174,7 +1177,7 @@ namespace rsx
 #endif
 			u64 start_time = get_system_time();
 
-			u64 vblank_rate = g_cfg.video.vblank_rate;
+			u64 vblank_rate = rsx::vr::effective_vblank_rate(); // VR fork: the VR frame rate's vblank rate while a headset runs
 			u64 vblank_period = 1'000'000 + u64{g_cfg.video.vblank_ntsc.get()} * 1000;
 
 			u64 local_vblank_count = 0;
@@ -1212,7 +1215,11 @@ namespace rsx
 							local_vblank_count = 0;
 
 							// We have a rare chance to update settings without losing precision whenever local_vblank_count is 0
-							vblank_rate = g_cfg.video.vblank_rate;
+							if (const u64 rate = rsx::vr::effective_vblank_rate(); rate != vblank_rate) // VR fork
+							{
+								rsx_log.notice("VBlank rate: %u Hz", rate);
+								vblank_rate = rate;
+							}
 							vblank_period = 1'000'000 + u64{g_cfg.video.vblank_ntsc.get()} * 1000;
 						}
 
@@ -2187,6 +2194,8 @@ namespace rsx
 		current_fragment_program.data = (static_cast<u8*>(data_ptr) + current_fp_metadata.program_start_offset);
 		current_fragment_program.offset = program_offset + current_fp_metadata.program_start_offset;
 		current_fragment_program.ucode_length = current_fp_metadata.program_ucode_length;
+		current_fragment_program.ucode_hash = current_fp_metadata.ucode_hash; // VR fork: hashed in the analysis pass
+		current_fragment_program.ucode_hash2 = current_fp_metadata.ucode_hash2;
 		current_fragment_program.total_length = current_fp_metadata.program_ucode_length + current_fp_metadata.program_start_offset;
 		current_fragment_program.texture_state.import(current_fp_texture_state, current_fp_metadata.referenced_textures_mask);
 		current_fragment_program.valid = true;
@@ -2231,12 +2240,17 @@ namespace rsx
 		current_vertex_program.data.reserve(512 * 4);
 		current_vertex_program.jump_table.clear();
 
+		if (!rsx::vr::vp_analysis_cached(method_registers.transform_program.data(), transform_program_start, current_vertex_program, current_vp_metadata)) // VR fork: analysis cache
+		{
 		current_vp_metadata = program_hash_util::vertex_program_utils::analyse_vertex_program
 		(
 			method_registers.transform_program.data(),  // Input raw block
 			transform_program_start,                    // Address of entry point
 			current_vertex_program                      // [out] Program object
 		);
+		rsx::vr::vp_analysis_store(method_registers.transform_program.data(), transform_program_start, current_vertex_program, current_vp_metadata); // VR fork
+		}
+		if (rsx::vr::on_vertex_ucode(current_vertex_program)) m_graphics_state |= (rsx::pipeline_state::vertex_program_state_dirty | rsx::pipeline_state::fragment_program_state_dirty); // VR fork: exact depth
 
 		current_vertex_program.texture_state.import(current_vp_texture_state, current_vp_metadata.referenced_textures_mask);
 
@@ -2300,6 +2314,7 @@ namespace rsx
 		current_vertex_program.output_mask = rsx::method_registers.vertex_attrib_output_mask();
 
 		current_vertex_program.ctrl &= ~RSX_SHADER_CONTROL_FLAT_SHADING;
+		rsx::vr::set_vr_program_ctrl(current_vertex_program.ctrl); // VR fork: the multiview and exact-depth shader variants
 		if (rsx::method_registers.shade_mode() == rsx::shading_mode::flat &&
 			backend_config.supports_last_provoking_vertex)
 		{
@@ -2342,6 +2357,7 @@ namespace rsx
 
 		current_fragment_program.ctrl &= fs_export_config_mask;
 		current_fragment_program.ctrl |= REGS(m_ctx)->shader_control() & (CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS | CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT | RSX_SHADER_CONTROL_USES_KIL);
+		rsx::vr::set_vr_program_ctrl(current_fragment_program.ctrl); // VR fork: the multiview and exact-depth shader variants
 		current_fragment_program.texcoord_control_mask = REGS(m_ctx)->texcoord_control_mask();
 		current_fragment_program.two_sided_lighting = REGS(m_ctx)->two_side_light_en();
 		current_fragment_program.mrt_buffers_count = rsx::utility::get_mrt_buffers_count(REGS(m_ctx)->surface_color_target());
@@ -2780,6 +2796,7 @@ namespace rsx
 	void thread::get_zcull_stats(u32 type, vm::addr_t sink)
 	{
 		u32 value = 0;
+		if (type == CELL_GCM_ZPASS_PIXEL_CNT && rsx::reports::zcull_all_visible()) value = 0xffff; else // VR fork: profile zcull_all_visible
 		if (!g_cfg.video.disable_zcull_queries)
 		{
 			switch (type)
@@ -3395,6 +3412,8 @@ namespace rsx
 		// MM sync. This is a pre-emptive operation, so we can use a deferred request.
 		rsx::mm_flush_lazy();
 
+		rsx::vr::on_frame_end(buffer, m_frame_stats.draw_calls); // VR fork: stereo inspector, camera probe, profile generator, development hooks
+
 		// Marks the end of a frame scope GPU-side
 		if (g_user_asked_for_frame_capture.exchange(false) && !capture_current_frame)
 		{
@@ -3574,6 +3593,8 @@ namespace rsx
 			return;
 		}
 
+		rsx::vr::on_flip(); // VR fork: RPCS3_VR_FRAMESTATS (development)
+
 		if (!m_queued_flip.pop(buffer))
 		{
 			// Frame was not queued before flipping
@@ -3586,18 +3607,19 @@ namespace rsx
 
 		switch (frame_limit)
 		{
-		case frame_limit_type::none: limit = g_cfg.core.max_cpu_preempt_count_per_frame ? static_cast<double>(g_cfg.video.vblank_rate) : 0.; break;
+		case frame_limit_type::none: limit = g_cfg.core.max_cpu_preempt_count_per_frame ? static_cast<double>(rsx::vr::effective_vblank_rate()) : 0.; break; // VR fork
 		case frame_limit_type::_30: limit = 30.; break;
 		case frame_limit_type::_50: limit = 50.; break;
 		case frame_limit_type::_60: limit = 60.; break;
  		case frame_limit_type::_120: limit = 120.; break;
 		case frame_limit_type::display_rate: limit = get_cached_display_refresh_rate(); break;
-		case frame_limit_type::_auto: limit = static_cast<double>(g_cfg.video.vblank_rate); break;
+		case frame_limit_type::_auto: limit = static_cast<double>(rsx::vr::effective_vblank_rate()); break; // VR fork
 		case frame_limit_type::_ps3: limit = 0.; break;
 		case frame_limit_type::infinite: limit = 0.; break;
 		default:
 			break;
 		}
+		limit = rsx::vr::vr_frame_limit(limit); // VR fork: in VR a fixed frame limit follows the VR frame rate
 
 		if (double limit2 = g_cfg.video.second_frame_limit; limit2 >= 0.1 && (limit2 < limit || !limit))
 		{
@@ -3617,6 +3639,7 @@ namespace rsx
 					const auto delay_us = target_rsx_flip_time - time;
 					lv2_obj::wait_timeout(delay_us, nullptr, false);
 					performance_counters.idle_time += delay_us;
+					rsx::vr::note_rsx_wait(rsx::vr::rsx_wait::limiter, delay_us); // VR fork: wait accounting
 				}
 			}
 
@@ -3815,7 +3838,7 @@ namespace rsx
 				}
 			};
 
-			const u64 vblank_rate_10 = g_cfg.video.vblank_rate * 10;
+			const u64 vblank_rate_10 = rsx::vr::effective_vblank_rate() * 10; // VR fork
 
 			if (can_reevaluate)
 			{
@@ -3838,7 +3861,7 @@ namespace rsx
 				}
 			}
 			// Sudden FPS drop detection
-			else if ((fails > 13 || hard_fails > 2 || !(abs_dst(fps_10, 300) < 20 || abs_dst(fps_10, 600) < 30 || abs_dst(fps_10, g_cfg.video.vblank_rate * 10) < 30 || abs_dst(fps_10, g_cfg.video.vblank_rate * 10 / 2) < 20)) && lowered_delay < raised_delay && is_last_frame_a_fail)
+			else if ((fails > 13 || hard_fails > 2 || !(abs_dst(fps_10, 300) < 20 || abs_dst(fps_10, 600) < 30 || abs_dst(fps_10, vblank_rate_10) < 30 || abs_dst(fps_10, vblank_rate_10 / 2) < 20)) && lowered_delay < raised_delay && is_last_frame_a_fail)
 			{
 				lower_preemption_count();
 			}

@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "title_id": "BCES00800",
+  "app_version": "01.00",
+  "name": "God of War II (God of War Collection)",
+  "max_fps": 0,
+  "default_fps": 0,
+  "game_fps_u32": ["0x5720f4"],
+  "game_rate_measured": false,
+
+  "resolution_scaled_constants": [
+    { "program": "c4882b95379447a8", "slots": [466, 467] }
+  ],
+
+  "matrix_layout": "row_vectors",
+  "camera_blocks": [256],
+  "output_aspect_tolerance": 0.02,
+  "display_rect": [32, 18, 1216, 684],
+
+  "camera_position": {
+    "eye_baseline": 0.864
+  },
+
+  "stereo": {
+    "formula": "clip_x_shear",
+    "per_eye_separation": 0.0185577,
+    "convergence": 128.051,
+    "eye_offset": "baseline"
+  },
+
+  "screen_space": {
+    "screen_frame_draws": [ { "program": "a3b1455d9ebdd381", "texture": "512x512" } ],
+    "offaspect_projection": true,
+    "frames_without_3d_as_screen": true
+  }
+}

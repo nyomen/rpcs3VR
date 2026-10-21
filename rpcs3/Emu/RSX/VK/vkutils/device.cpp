@@ -1,4 +1,6 @@
 #include "device.h"
+#include "../VKOpenXR.h"
+#include "../VKMultiviewVR.h" // VR fork: push descriptors
 #include "instance.h"
 #include "util/logs.hpp"
 #include "Emu/system_config.h"
@@ -36,6 +38,7 @@ namespace vk
 		VkPhysicalDeviceFaultFeaturesEXT device_fault_info{};
 		VkPhysicalDeviceMultiDrawFeaturesEXT multidraw_info{};
 		VkPhysicalDeviceProvokingVertexFeaturesEXT provoking_vertex_info{};
+		VkPhysicalDeviceMultiviewFeatures multiview_info{};
 
 		// Core features
 		shader_support_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
@@ -96,6 +99,14 @@ namespace vk
 			features2.pNext             = &provoking_vertex_info;
 		}
 
+		// VR fork: multiview (core since 1.1, so it may be present without the extension name)
+		if (device_extensions.is_supported(VK_KHR_MULTIVIEW_EXTENSION_NAME) || props.apiVersion >= VK_API_VERSION_1_1)
+		{
+			multiview_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES;
+			multiview_info.pNext = features2.pNext;
+			features2.pNext      = &multiview_info;
+		}
+
 		vkGetPhysicalDeviceFeatures2(dev, &features2);
 
 		shader_types_support.allow_float64 = !!features2.features.shaderFloat64;
@@ -113,6 +124,8 @@ namespace vk
 		optional_features_support.framebuffer_loops   = !!fbo_loops_info.attachmentFeedbackLoopLayout;
 		optional_features_support.extended_device_fault = !!device_fault_info.deviceFault;
 		optional_features_support.provoking_vertex_last = !!provoking_vertex_info.provokingVertexLast;
+		optional_features_support.multiview = !!multiview_info.multiview;
+		optional_features_support.shader_viewport_index_layer = device_extensions.is_supported(VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME);
 
 		features = features2.features;
 
@@ -225,6 +238,8 @@ namespace vk
 				descriptor_max_draw_calls = 8192;
 			}
 		}
+
+		optional_features_support.max_push_descriptors = vk::vr_push_descriptor_limit(dev); // VR fork: push descriptors
 
 		if (multidraw_support.supported)
 		{
@@ -481,7 +496,7 @@ namespace vk
 	// Render Device - The actual usable device
 	void render_device::create(vk::physical_device& pdev, u32 graphics_queue_idx, u32 present_queue_idx, u32 transfer_queue_idx)
 	{
-		float queue_priorities[1] = { 0.f };
+		float queue_priorities[3] = { 0.f, 0.f, 0.f };
 		pgpu = &pdev;
 
 		ensure(graphics_queue_idx == present_queue_idx || present_queue_idx == umax); // TODO
@@ -509,6 +524,13 @@ namespace vk
 				graphics_queue.queueCount++;
 				transfer_queue_sub_index = 1;
 			}
+		}
+
+		// One more graphics queue, if the family has it, for the OpenXR frame thread.
+		u32 xr_queue_sub_index = umax;
+		if (pdev.get_queue_properties(graphics_queue_idx).queueCount > graphics_queue.queueCount)
+		{
+			xr_queue_sub_index = graphics_queue.queueCount++;
 		}
 
 		m_graphics_queue_family = graphics_queue_idx;
@@ -588,6 +610,23 @@ namespace vk
 		{
 			requested_extensions.push_back(VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME);
 		}
+
+		// VR fork: multiview stereo (both eyes in one draw) and per-view scissors
+		{
+			const supported_extensions vr_device_support(supported_extensions::device, nullptr, *pgpu);
+			if (pgpu->optional_features_support.multiview && vr_device_support.is_supported(VK_KHR_MULTIVIEW_EXTENSION_NAME))
+			{
+				requested_extensions.push_back(VK_KHR_MULTIVIEW_EXTENSION_NAME);
+			}
+			if (pgpu->optional_features_support.shader_viewport_index_layer)
+			{
+				requested_extensions.push_back(VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME);
+			}
+			if (pgpu->optional_features_support.max_push_descriptors)
+			{
+				requested_extensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+			}
+		}
 		
 #ifdef __APPLE__
 		if (pgpu->optional_features_support.portability)
@@ -603,6 +642,7 @@ namespace vk
 		enabled_features.depthClamp = VK_TRUE;
 		enabled_features.depthBounds = VK_TRUE;
 		enabled_features.wideLines = VK_TRUE;
+		enabled_features.multiViewport = pgpu->features.multiViewport; // VR fork: multiview stereo, one viewport and scissor per view
 		enabled_features.largePoints = VK_TRUE;
 		enabled_features.shaderFloat64 = VK_TRUE;
 
@@ -718,6 +758,22 @@ namespace vk
 			rsx_log.error("Your GPU does not support framebuffer logical operations. Graphics may not render correctly.");
 			enabled_features.logicOp = VK_FALSE;
 		}
+
+		// OpenXR (XR_KHR_vulkan_enable) requires these on the app's own device.
+		if (const auto& xr_extensions = vk::xr::device_extensions(); !xr_extensions.empty())
+		{
+			const supported_extensions device_support(supported_extensions::device, nullptr, *pgpu);
+			for (const auto& ext : xr_extensions)
+			{
+				if (device_support.is_supported(ext) &&
+					std::none_of(requested_extensions.begin(), requested_extensions.end(), [&](const char* e) { return ext == e; }))
+				{
+					requested_extensions.push_back(ext.c_str());
+				}
+			}
+		}
+
+		vk::vr_gpu_checkpoints_extensions(*pgpu, requested_extensions); // VR fork: dev GPU checkpoints (RPCS3_VR_GPU_CHECKPOINTS), DLSS test (RPCS3_DLSS)
 
 		VkDeviceCreateInfo device = {};
 		device.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -841,6 +897,16 @@ namespace vk
 			device.pNext = &provoking_vertex_info;
 		}
 
+		VkPhysicalDeviceMultiviewFeatures multiview_features{};
+		if (pgpu->optional_features_support.multiview)
+		{
+			multiview_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES;
+			multiview_features.pNext = const_cast<void*>(device.pNext);
+			multiview_features.multiview = VK_TRUE;
+			device.pNext = &multiview_features;
+		}
+
+		vk::vr_gpu_checkpoints_chain(device); // VR fork: dev GPU checkpoints, DLSS test features
 		if (auto error = vkCreateDevice(*pgpu, &device, nullptr, &dev))
 		{
 			dump_debug_info(requested_extensions, enabled_features);
@@ -857,6 +923,11 @@ namespace vk
 		// Initialize queues
 		vkGetDeviceQueue(dev, graphics_queue_idx, 0, &m_graphics_queue);
 		vkGetDeviceQueue(dev, transfer_queue_idx, transfer_queue_sub_index, &m_transfer_queue);
+		if (xr_queue_sub_index != umax)
+		{
+			vkGetDeviceQueue(dev, graphics_queue_idx, xr_queue_sub_index, &m_xr_queue);
+			m_xr_queue_index = xr_queue_sub_index;
+		}
 
 		if (present_queue_idx != umax)
 		{

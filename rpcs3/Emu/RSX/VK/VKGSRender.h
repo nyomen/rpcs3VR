@@ -23,6 +23,7 @@
 #include "Emu/RSX/Host/RSXDMAWriter.h"
 #include <functional>
 #include <initializer_list>
+#include "VKGSRenderVR.h" // VR fork
 
 using namespace vk::vmm_allocation_pool_; // clang workaround.
 using namespace vk::upscaling_flags_;     // ditto
@@ -114,6 +115,7 @@ private:
 
 	std::unique_ptr<vk::buffer> m_host_object_data;
 	vk::framebuffer_holder* m_draw_fbo = nullptr;
+#include "VKGSRenderVR.inl" // VR fork: all VR members and declarations
 
 	sizeu m_swapchain_dims{};
 	bool swapchain_unavailable = false;
@@ -248,7 +250,7 @@ private:
 	void upload_transform_constants(const rsx::io_buffer& buffer);
 
 	void load_texture_env();
-	bool bind_texture_env();
+	bool bind_texture_env(bool vr_right_eye = false); // VR fork: right-eye surfaces for render-target reads
 	bool bind_interpreter_texture_env();
 
 public:

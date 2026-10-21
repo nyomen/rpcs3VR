@@ -5,6 +5,7 @@
 #include "VKFragmentProgram.h"
 #include "VKHelpers.h"
 #include "VKRenderPass.h"
+#include "VKMultiviewVR.h" // VR fork
 
 #include "Emu/RSX/Overlays/Shaders/shader_loading_dialog.h"
 #include "Emu/RSX/Program/GLSLCommon.h"
@@ -84,6 +85,7 @@ namespace vk
 			m_vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
 			m_vp.viewportCount = 1;
 			m_vp.scissorCount = 1;
+			vk::vr_interpreter_pipeline_state(m_properties, m_vp); // VR fork: multiview, one viewport per view (DLSS test: no motion writes)
 
 			m_ms = m_properties.state.ms;
 			ensure(m_ms.rasterizationSamples == VkSampleCountFlagBits((m_properties.renderpass_key >> 16) & 0xF)); // "Multisample state mismatch!"
@@ -164,7 +166,7 @@ namespace vk
 
 	std::shared_ptr<VKVertexProgram> shader_interpreter::build_vs(u64 compiler_options)
 	{
-		compiler_options &= COMPILER_OPT_ALL_VS_MASK;
+		compiler_options &= (COMPILER_OPT_ALL_VS_MASK | COMPILER_OPT_VR_MULTIVIEW);
 		{
 			reader_lock lock(m_vs_shader_cache_lock);
 			if (auto found = m_vs_shader_cache.find(compiler_options);
@@ -190,7 +192,9 @@ namespace vk
 		null_prog.ctrl = (compiler_options & COMPILER_OPT_ENABLE_INSTANCING)
 			? RSX_SHADER_CONTROL_INSTANCED_CONSTANTS
 			: 0;
+		null_prog.ctrl |= (compiler_options & COMPILER_OPT_VR_MULTIVIEW) ? RSX_SHADER_CONTROL_VR_MULTIVIEW : 0; // VR fork: multiview variant (per-view draw parameters)
 		VKVertexDecompilerThread comp(null_prog, shader_str, arr, *vk_prog);
+		comp.m_device_props.vr_viewport_index = (compiler_options & COMPILER_OPT_VR_MULTIVIEW) && vk::get_current_renderer()->get_shader_viewport_index_layer_support(); // VR fork
 
 		// Initialize compiler properties
 		comp.properties.has_indexed_constants = true;
@@ -212,7 +216,10 @@ namespace vk
 		"#define transform_branch_bits get_vertex_context().transform_branch_bits\n"
 		"#define point_size get_vertex_context().point_size\n"
 		"#define z_near get_vertex_context().z_near\n"
-		"#define z_far get_vertex_context().z_far\n\n";
+		"#define z_far get_vertex_context().z_far\n"
+		"#define VR_KEEP_DEPTH get_vertex_context().vr_keep_depth\n"
+		"#define VR_DEPTH_SCALE get_vertex_context().vr_depth_scale\n"
+		"#define VR_DEPTH_OFFSET get_vertex_context().vr_depth_offset\n\n";
 
 		// Insert vp stream input
 		builder << "\n"
@@ -245,7 +252,7 @@ namespace vk
 		::glsl::insert_vertex_input_fetch(builder, ::glsl::glsl_rules::glsl_rules_vulkan);
 		comp.insertFSExport(builder);
 
-		builder << program_common::interpreter::get_vertex_interpreter();
+		vk::vr_insert_interpreter_vertex(builder, program_common::interpreter::get_vertex_interpreter(), comp.m_device_props.vr_viewport_index); // VR fork: multiview, a scissor per view
 		const std::string s = builder.str();
 
 		auto vs = &vk_prog->shader;
@@ -273,7 +280,7 @@ namespace vk
 
 	std::shared_ptr<VKFragmentProgram> shader_interpreter::build_fs(u64 compiler_options)
 	{
-		compiler_options &= COMPILER_OPT_ALL_FS_MASK;
+		compiler_options &= (COMPILER_OPT_ALL_FS_MASK | COMPILER_OPT_VR_MULTIVIEW);
 		{
 			reader_lock lock(m_fs_shader_cache_lock);
 			if (auto found = m_fs_shader_cache.find(compiler_options);
@@ -309,6 +316,7 @@ namespace vk
 		"#extension GL_EXT_scalar_block_layout : require\n"
 		"#extension GL_EXT_uniform_buffer_unsized_array : require\n"
 		"#extension GL_ARB_separate_shader_objects : enable\n\n";
+		vk::vr_insert_interpreter_fragment_extensions(builder, compiler_options); // VR fork: multiview
 
 		::glsl::insert_subheader_block(builder);
 		comp.insertConstants(builder);
@@ -389,7 +397,7 @@ namespace vk
 
 			for (int i = 0, bind_location = fragment_textures_start; i < 4; ++i)
 			{
-				builder << "layout(set=1, binding=" << bind_location++ << ") " << "uniform " << type_names[i] << " " << type_names[i] << "_array[16];\n";
+				builder << "layout(set=1, binding=" << bind_location++ << ") " << "uniform " << vk::vr_interpreter_sampler_type(type_names[i], compiler_options) << " " << type_names[i] << "_array[16];\n"; // VR fork: multiview arrays
 			}
 
 			builder << "\n"
@@ -418,7 +426,7 @@ namespace vk
 			"	float alpha_ref = fs_contexts[_fs_context_offset].alpha_ref;\n\n";
 
 		::glsl::insert_glsl_legacy_function(builder, properties);
-		builder << program_common::interpreter::get_fragment_interpreter();
+		vk::vr_insert_interpreter_fragment(builder, program_common::interpreter::get_fragment_interpreter(), compiler_options); // VR fork: multiview samples arrays
 		const std::string s = builder.str();
 
 		auto fs = &vk_prog->shader;
@@ -587,6 +595,7 @@ namespace vk
 		if (rsx::method_registers.polygon_stipple_enabled()) key.compiler_opt |= COMPILER_OPT_ENABLE_STIPPLING;
 		if (vp_ctrl & RSX_SHADER_CONTROL_INSTANCED_CONSTANTS) key.compiler_opt |= COMPILER_OPT_ENABLE_INSTANCING;
 		if (vp_metadata.referenced_textures_mask) key.compiler_opt |= COMPILER_OPT_ENABLE_VTX_TEXTURES;
+		if (vp_ctrl & RSX_SHADER_CONTROL_VR_MULTIVIEW) key.compiler_opt |= COMPILER_OPT_VR_MULTIVIEW; // VR fork
 
 		if (m_current_key == key) [[likely]]
 		{
@@ -656,8 +665,8 @@ namespace vk
 
 	std::pair<std::shared_ptr<VKVertexProgram>, std::shared_ptr<VKFragmentProgram>> shader_interpreter::get_shaders() const
 	{
-		const auto vs_opt = m_current_key.compiler_opt & COMPILER_OPT_ALL_VS_MASK;
-		const auto fs_opt = m_current_key.compiler_opt & COMPILER_OPT_ALL_FS_MASK;
+		const auto vs_opt = m_current_key.compiler_opt & (COMPILER_OPT_ALL_VS_MASK | COMPILER_OPT_VR_MULTIVIEW);
+		const auto fs_opt = m_current_key.compiler_opt & (COMPILER_OPT_ALL_FS_MASK | COMPILER_OPT_VR_MULTIVIEW);
 
 		std::shared_ptr<VKVertexProgram> vs;
 		std::shared_ptr<VKFragmentProgram> fs;

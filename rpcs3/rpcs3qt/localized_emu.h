@@ -376,6 +376,45 @@ private:
 		case localized_string_id::BIG_PICTURE_GAME_DETAILS_START: return tr("Start");
 		case localized_string_id::BIG_PICTURE_HINT_BACK: return tr("Back");
 		case localized_string_id::BIG_PICTURE_HINT_SELECT: return tr("Select");
+		// VR fork
+		case localized_string_id::HOME_MENU_SETTINGS_VR: return tr("VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_FIXED_SCREEN: return tr("Fixed Screen (floating 3D window)", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_HUD_FIXED: return tr("HUD Fixed In Front", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_HUD_SCALE: return tr("HUD Scale", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_HUD_DEPTH: return tr("HUD Depth", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_HUD_OFFSET_X: return tr("HUD Horizontal Offset", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_HUD_OFFSET_Y: return tr("HUD Vertical Offset", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_SCREEN_DEPTH: return tr("Screen 3D Depth", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_CAMERA_X: return tr("Camera X Offset", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_CAMERA_Y: return tr("Camera Y Offset", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_CAMERA_DEPTH: return tr("Camera Z Offset", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_REPROJECTION_MARGIN: return tr("Reprojection Margin", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_FRAME_RATE: return tr("Frame Rate", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_CINEMATIC_SCENES: return tr("Cinematic Scenes", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_DLSS: return tr("DLSS (experimental)", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_DLSS_MODEL: return tr("DLSS Model (experimental)", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_DLSS_SHARPENING: return tr("DLSS Sharpening", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_FRAME_GENERATION: return tr("DLSS Frame Generation (experimental)", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_FRAMEGEN_MULTIPLIER: return tr("DLSS Frame Generation Multiplier", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_FRAMEGEN_MOTION: return tr("DLSS Frame Generation Motion", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_REDUCED_RATE_REFLECTIONS: return tr("Reduced-Rate Reflections", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_REDUCED_RATE_MIRROR: return tr("Reduced-Rate Mirror", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_SIMPLER_DISTANT_CARS: return tr("Simpler Distant Cars", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_HIGHEST_DETAIL_MODELS: return tr("Highest Detail Models", "VR"); // VR fork
+		case localized_string_id::HOME_MENU_SETTINGS_VR_SECTION_GAME: return tr("Game", "VR settings section"); // VR fork
+		case localized_string_id::HOME_MENU_SETTINGS_VR_SIMPLER_VEHICLES: return tr("Simpler Other Vehicles", "VR"); // VR fork
+		case localized_string_id::HOME_MENU_SETTINGS_VR_FEWER_SHADOWS: return tr("Fewer Shadows", "VR"); // VR fork
+		case localized_string_id::HOME_MENU_SETTINGS_VR_HEAD_AIM: return tr("Head Aim", "VR"); // VR fork
+		case localized_string_id::HOME_MENU_SETTINGS_VR_HEAD_AIM_SPEED: return tr("Head Aim Speed", "VR"); // VR fork
+		case localized_string_id::HOME_MENU_SETTINGS_VR_VERTICAL_VIEW: return tr("Vertical View (lower = faster)", "VR"); // VR fork
+		case localized_string_id::HOME_MENU_SETTINGS_VR_HORIZONTAL_VIEW: return tr("Horizontal View (lower = faster)", "VR"); // VR fork
+		case localized_string_id::HOME_MENU_SETTINGS_VR_SHADOW_COVERAGE: return tr("Shadow Coverage (lower = sharper)", "VR"); // VR fork
+		case localized_string_id::HOME_MENU_SETTINGS_VR_SECTION_GENERAL: return tr("General", "VR settings section"); // VR fork
+		case localized_string_id::HOME_MENU_SETTINGS_VR_WORLD_SCALE: return tr("World Scale", "VR");
+		case localized_string_id::HOME_MENU_SETTINGS_VR_GENERATE_PROFILE: return tr("Generate VR Profile (samples 10 seconds of gameplay)", "VR");
+		case localized_string_id::VR_PROFILE_GENERATING: return tr("Generating VR profile: keep playing for 10 seconds...", "VR");
+		case localized_string_id::VR_PROFILE_CREATED: return tr("VR profile created and VR enabled. Restart the game to use a headset.", "VR");
+		case localized_string_id::VR_PROFILE_FAILED: return tr("VR profile generation failed: try again during 3D gameplay (see log).", "VR");
 		case localized_string_id::INVALID: return tr("Invalid");
 		default: return tr("Unknown");
 		}

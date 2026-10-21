@@ -784,3 +784,111 @@ void fmt_class_string<vsync_mode>::format(std::string& out, u64 arg)
 		return unknown;
 	});
 }
+
+template <>
+void fmt_class_string<vr_cinematic_scenes>::format(std::string& out, u64 arg)
+{
+	format_enum(out, arg, [](vr_cinematic_scenes value)
+	{
+		switch (value)
+		{
+		case vr_cinematic_scenes::fixed_screen: return "Fixed Screen";
+		case vr_cinematic_scenes::full_quality: return "Full Quality";
+		}
+
+		return unknown;
+	});
+}
+
+template <>
+void fmt_class_string<vr_dlss_mode>::format(std::string& out, u64 arg)
+{
+	format_enum(out, arg, [](vr_dlss_mode value)
+	{
+		switch (value)
+		{
+		case vr_dlss_mode::off: return "Off";
+		case vr_dlss_mode::dlaa: return "DLAA";
+		case vr_dlss_mode::quality: return "Quality";
+		case vr_dlss_mode::balanced: return "Balanced";
+		case vr_dlss_mode::performance: return "Performance";
+		case vr_dlss_mode::ultra_performance: return "Ultra Performance";
+		}
+
+		return unknown;
+	});
+}
+
+template <>
+void fmt_class_string<vr_dlss_model>::format(std::string& out, u64 arg)
+{
+	format_enum(out, arg, [](vr_dlss_model value)
+	{
+		switch (value)
+		{
+		case vr_dlss_model::default_model: return "Default";
+		case vr_dlss_model::e: return "E";
+		case vr_dlss_model::f: return "F";
+		case vr_dlss_model::j: return "J";
+		case vr_dlss_model::k: return "K";
+		case vr_dlss_model::l: return "L";
+		case vr_dlss_model::m: return "M";
+		}
+
+		return unknown;
+	});
+}
+
+template <>
+void fmt_class_string<vr_framegen_multiplier>::format(std::string& out, u64 arg)
+{
+	format_enum(out, arg, [](vr_framegen_multiplier value)
+	{
+		switch (value)
+		{
+		case vr_framegen_multiplier::x2: return "2x";
+		case vr_framegen_multiplier::x3: return "3x";
+		}
+
+		return unknown;
+	});
+}
+
+template <>
+void fmt_class_string<vr_framegen_motion>::format(std::string& out, u64 arg)
+{
+	format_enum(out, arg, [](vr_framegen_motion value)
+	{
+		switch (value)
+		{
+		case vr_framegen_motion::hybrid: return "Hybrid";
+		case vr_framegen_motion::game: return "Game";
+		}
+
+		return unknown;
+	});
+}
+
+template <>
+void fmt_class_string<vr_frame_rate>::format(std::string& out, u64 arg)
+{
+	format_enum(out, arg, [](vr_frame_rate value)
+	{
+		switch (value)
+		{
+		case vr_frame_rate::profile_default: return "Default";
+		case vr_frame_rate::fps_30: return "30";
+		case vr_frame_rate::fps_45: return "45";
+		case vr_frame_rate::fps_60: return "60";
+		case vr_frame_rate::fps_72: return "72";
+		case vr_frame_rate::fps_75: return "75";
+		case vr_frame_rate::fps_80: return "80";
+		case vr_frame_rate::fps_90: return "90";
+		case vr_frame_rate::fps_120: return "120";
+		case vr_frame_rate::fps_144: return "144";
+		case vr_frame_rate::unlimited: return "Unlimited";
+		}
+
+		return unknown;
+	});
+}

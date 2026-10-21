@@ -56,6 +56,14 @@
 /bin/GuiConfigs/*.dat
 /bin/GuiConfigs/*.dat.*
 
+# VR fork: per-title camera/stereo profiles
+!/bin/vr_profiles/
+
+# VR fork: game patches (the downloaded community patch.yml stays untracked)
+!/bin/patches/
+/bin/patches/patch.yml
+/bin/patches/patch.yml.*
+
 # Visual Studio Files
 .vs/*
 .vscode/*

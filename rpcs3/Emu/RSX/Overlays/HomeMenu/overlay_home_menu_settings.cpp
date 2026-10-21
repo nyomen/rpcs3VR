@@ -1,6 +1,8 @@
 #include "stdafx.h"
 #include "overlay_home_menu_settings.h"
 #include "Emu/system_config.h"
+#include "Emu/RSX/Capture/rsx_camera_probe.h"
+#include "Emu/RSX/Capture/rsx_vr_profile_generator.h"
 
 namespace rsx
 {
@@ -15,6 +17,7 @@ namespace rsx
 
 			add_page(home_menu::fa_icon::audio, std::make_shared<home_menu_settings_audio>(x, y, width, height, use_separators, nullptr));
 			add_page(home_menu::fa_icon::video, std::make_shared<home_menu_settings_video>(x, y, width, height, use_separators, nullptr));
+			add_page(home_menu::fa_icon::vr, std::make_shared<home_menu_settings_vr>(x, y, width, height, use_separators, nullptr));
 			add_page(home_menu::fa_icon::gamepad, std::make_shared<home_menu_settings_input>(x, y, width, height, use_separators, nullptr));
 			add_page(home_menu::fa_icon::settings, std::make_shared<home_menu_settings_advanced>(x, y, width, height, use_separators, nullptr));
 			add_page(home_menu::fa_icon::settings_sliders, std::make_shared<home_menu_settings_overlays>(x, y, width, height, use_separators, nullptr));
@@ -169,6 +172,128 @@ namespace rsx
 			{
 				add_dropdown(&g_cfg.video.stereo_render_mode, localized_string_id::HOME_MENU_SETTINGS_VIDEO_STEREO_MODE);
 			}
+
+			apply_layout();
+		}
+
+		// Every value is read at each flip, so changes apply to the next frame.
+		home_menu_settings_vr::home_menu_settings_vr(s16 x, s16 y, u16 width, u16 height, bool use_separators, home_menu_page* parent)
+			: home_menu_settings_page(x, y, width, height, use_separators, parent, get_localized_string(localized_string_id::HOME_MENU_SETTINGS_VR))
+		{
+			build();
+		}
+
+		// DLSS's own options show only while DLSS is on: when a choice turns it on or off, the page is rebuilt in place (the
+		// selected row kept; the options follow the DLSS row).
+		page_navigation home_menu_settings_vr::handle_button_press(pad_button button_press, bool is_auto_repeat, u64 auto_repeat_interval_ms)
+		{
+			const page_navigation result = home_menu_settings_page::handle_button_press(button_press, is_auto_repeat, auto_repeat_interval_ms);
+			if (m_dlss_options != dlss_options_shown())
+			{
+				const s32 selected = get_selected_index();
+				build();
+				select_entry(selected);
+			}
+			return result;
+		}
+
+		bool home_menu_settings_vr::dlss_options_shown()
+		{
+			return rsx::vr::dlss_session() && g_cfg.video.vr.dlss != vr_dlss_mode::off;
+		}
+
+		void home_menu_settings_vr::build()
+		{
+			clear_entries();
+			m_dlss_options = dlss_options_shown();
+
+			// Without a VR profile the game cannot be rendered in VR; offer to make one
+			// from the running game instead of the settings.
+			if (!rsx::vr::camera_probe::get().profile())
+			{
+				add_item(home_menu::fa_icon::vr, get_localized_string(localized_string_id::HOME_MENU_SETTINGS_VR_GENERATE_PROFILE), [](pad_button btn) -> page_navigation
+				{
+					if (btn != pad_button::cross) return page_navigation::stay;
+
+					rsx_log.notice("User selected VR profile generation in home menu");
+					rsx::vr::profile_generator::get().request();
+					return page_navigation::exit_menu; // sample the game, not the menu
+				});
+				apply_layout();
+				return;
+			}
+
+			// VR fork: two sections. "Game": the options this game's VR profile offers (its rules tagged "option", cinematic
+			// scenes; live), first so they are seen. "General": every game's settings. Headings only when the game has options.
+			if (const auto* profile = rsx::vr::camera_probe::get().profile(); profile && (profile->reduced_scale_percent ||
+				rsx::vr::profile_has_option(*profile, "highest_detail") || rsx::vr::profile_has_option(*profile, "reflections") ||
+				rsx::vr::profile_has_option(*profile, "mirror") || rsx::vr::profile_has_option(*profile, "distant_cars") ||
+				rsx::vr::profile_has_option(*profile, "simpler_vehicles") || rsx::vr::profile_has_option(*profile, "fewer_shadows") ||
+				rsx::vr::profile_has_option(*profile, "head_aim") || rsx::vr::profile_has_option(*profile, "vertical_view") ||
+				rsx::vr::profile_has_option(*profile, "horizontal_view") || rsx::vr::profile_has_option(*profile, "shadow_coverage")))
+			{
+				const auto heading = [this](localized_string_id id)
+				{
+					add_item(home_menu::fa_icon::none, get_localized_string(id), [](pad_button) { return page_navigation::stay; });
+				};
+				heading(localized_string_id::HOME_MENU_SETTINGS_VR_SECTION_GAME);
+				if (rsx::vr::profile_has_option(*profile, "highest_detail")) add_checkbox(&g_cfg.video.vr.highest_detail_models, localized_string_id::HOME_MENU_SETTINGS_VR_HIGHEST_DETAIL_MODELS);
+				if (rsx::vr::profile_has_option(*profile, "simpler_vehicles")) add_checkbox(&g_cfg.video.vr.simpler_vehicles, localized_string_id::HOME_MENU_SETTINGS_VR_SIMPLER_VEHICLES);
+				if (rsx::vr::profile_has_option(*profile, "fewer_shadows")) add_checkbox(&g_cfg.video.vr.fewer_shadows, localized_string_id::HOME_MENU_SETTINGS_VR_FEWER_SHADOWS);
+				if (rsx::vr::profile_has_option(*profile, "head_aim")) add_checkbox(&g_cfg.video.vr.head_aim, localized_string_id::HOME_MENU_SETTINGS_VR_HEAD_AIM);
+				if (rsx::vr::profile_has_option(*profile, "head_aim")) add_unsigned_slider(&g_cfg.video.vr.head_aim_speed, localized_string_id::HOME_MENU_SETTINGS_VR_HEAD_AIM_SPEED, " %", 10); // VR fork
+				if (rsx::vr::profile_has_option(*profile, "horizontal_view")) add_unsigned_slider(&g_cfg.video.vr.horizontal_view, localized_string_id::HOME_MENU_SETTINGS_VR_HORIZONTAL_VIEW, " %", 5); // VR fork
+				if (rsx::vr::profile_has_option(*profile, "vertical_view")) add_unsigned_slider(&g_cfg.video.vr.vertical_view, localized_string_id::HOME_MENU_SETTINGS_VR_VERTICAL_VIEW, " %", 5); // VR fork
+				if (rsx::vr::profile_has_option(*profile, "shadow_coverage")) add_unsigned_slider(&g_cfg.video.vr.shadow_coverage, localized_string_id::HOME_MENU_SETTINGS_VR_SHADOW_COVERAGE, " %", 5); // VR fork
+				if (rsx::vr::profile_has_option(*profile, "reflections")) add_checkbox(&g_cfg.video.vr.reduced_rate_reflections, localized_string_id::HOME_MENU_SETTINGS_VR_REDUCED_RATE_REFLECTIONS);
+				if (rsx::vr::profile_has_option(*profile, "mirror")) add_checkbox(&g_cfg.video.vr.reduced_rate_mirror, localized_string_id::HOME_MENU_SETTINGS_VR_REDUCED_RATE_MIRROR);
+				if (rsx::vr::profile_has_option(*profile, "distant_cars")) add_checkbox(&g_cfg.video.vr.simpler_distant_cars, localized_string_id::HOME_MENU_SETTINGS_VR_SIMPLER_DISTANT_CARS);
+				if (profile->reduced_scale_percent) add_dropdown(&g_cfg.video.vr.cinematic_scenes, localized_string_id::HOME_MENU_SETTINGS_VR_CINEMATIC_SCENES);
+				heading(localized_string_id::HOME_MENU_SETTINGS_VR_SECTION_GENERAL);
+			}
+			add_checkbox(&g_cfg.video.vr.fixed_screen, localized_string_id::HOME_MENU_SETTINGS_VR_FIXED_SCREEN);
+			add_checkbox(&g_cfg.video.vr.hud_fixed, localized_string_id::HOME_MENU_SETTINGS_VR_HUD_FIXED);
+			// Frame rates up to the most this game works at (its VR profile's max_fps).
+			if (const auto* profile = rsx::vr::camera_probe::get().profile())
+			{
+				const u32 max_fps = profile->max_fps;
+				const u32 default_fps = profile->default_fps;
+				// "Default" names the game's own default rate (from its VR profile).
+				add_dropdown(&g_cfg.video.vr.frame_rate, localized_string_id::HOME_MENU_SETTINGS_VR_FRAME_RATE,
+					[max_fps](u32 option) { return rsx::vr::frame_rate_option_allowed(option, max_fps); },
+					[default_fps](u32 option, const std::string& text)
+					{
+						if (rsx::vr::frame_rate_option_fps(option) != umax) return text;
+						return default_fps ? fmt::format("%s (%u FPS)", text, default_fps) : fmt::format("%s (headset refresh rate)", text);
+					});
+			}
+			if (rsx::vr::dlss_session()) // VR fork: DLSS mode and model, live in a session that booted with DLSS on
+			{
+				add_dropdown(&g_cfg.video.vr.dlss, localized_string_id::HOME_MENU_SETTINGS_VR_DLSS);
+				if (m_dlss_options) // DLSS's own options only with DLSS on
+				{
+					add_dropdown(&g_cfg.video.vr.dlss_model, localized_string_id::HOME_MENU_SETTINGS_VR_DLSS_MODEL);
+					add_unsigned_slider(&g_cfg.video.vr.dlss_sharpening, localized_string_id::HOME_MENU_SETTINGS_VR_DLSS_SHARPENING, " %", 5); // VR fork
+					add_checkbox(&g_cfg.video.vr.frame_generation, localized_string_id::HOME_MENU_SETTINGS_VR_FRAME_GENERATION); // VR fork (framegen)
+					add_dropdown(&g_cfg.video.vr.frame_generation_multiplier, localized_string_id::HOME_MENU_SETTINGS_VR_FRAMEGEN_MULTIPLIER);
+					add_dropdown(&g_cfg.video.vr.frame_generation_motion, localized_string_id::HOME_MENU_SETTINGS_VR_FRAMEGEN_MOTION);
+				}
+			}
+			add_unsigned_slider(&g_cfg.video.vr.world_scale, localized_string_id::HOME_MENU_SETTINGS_VR_WORLD_SCALE, " %", 5);
+			add_unsigned_slider(&g_cfg.video.vr.hud_scale, localized_string_id::HOME_MENU_SETTINGS_VR_HUD_SCALE, " %", 5);
+			{
+				// 0 = Auto (the VR profile's HUD depth, else 2 m); below 1 m is not allowed.
+				const auto* profile = rsx::vr::camera_probe::get().profile();
+				const std::string auto_label = profile && profile->hud_depth > 0.f ? fmt::format("Auto (%.2g m)", profile->hud_depth) : "Auto (2 m)";
+				add_unsigned_slider(&g_cfg.video.vr.hud_depth, localized_string_id::HOME_MENU_SETTINGS_VR_HUD_DEPTH, " cm", 25, { { 0, auto_label } }, { 25, 50, 75 });
+			}
+			add_signed_slider(&g_cfg.video.vr.hud_offset_x, localized_string_id::HOME_MENU_SETTINGS_VR_HUD_OFFSET_X, " %", 1);
+			add_signed_slider(&g_cfg.video.vr.hud_offset_y, localized_string_id::HOME_MENU_SETTINGS_VR_HUD_OFFSET_Y, " %", 1);
+			add_unsigned_slider(&g_cfg.video.vr.screen_depth, localized_string_id::HOME_MENU_SETTINGS_VR_SCREEN_DEPTH, " %", 5);
+			add_signed_slider(&g_cfg.video.vr.camera_x, localized_string_id::HOME_MENU_SETTINGS_VR_CAMERA_X, " cm", 5);
+			add_signed_slider(&g_cfg.video.vr.camera_y, localized_string_id::HOME_MENU_SETTINGS_VR_CAMERA_Y, " cm", 5);
+			add_signed_slider(&g_cfg.video.vr.camera_z, localized_string_id::HOME_MENU_SETTINGS_VR_CAMERA_DEPTH, " cm", 5);
+			add_signed_slider(&g_cfg.video.vr.reprojection_margin, localized_string_id::HOME_MENU_SETTINGS_VR_REPROJECTION_MARGIN, "°", 1, { { -1, "Auto" } });
 
 			apply_layout();
 		}

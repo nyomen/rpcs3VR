@@ -144,4 +144,6 @@ private:
 	steady_clock::time_point m_last_wheel_move_down;
 	steady_clock::time_point m_last_wheel_move_left;
 	steady_clock::time_point m_last_wheel_move_right;
+
+#include "keyboard_pad_handler_vr.inl" // VR fork: scripted key presses (development)
 };
