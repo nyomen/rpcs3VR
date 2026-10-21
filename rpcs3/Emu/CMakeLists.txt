@@ -194,6 +194,7 @@ target_sources(rpcs3_emu PRIVATE
     Cell/SPUDisAsm.cpp
     Cell/SPUInterpreter.cpp
     Cell/SPUCommonRecompiler.cpp
+    Cell/SPUAsyncCompile.cpp
     Cell/SPULLVMRecompiler.cpp
     Cell/SPUThread.cpp
     Cell/lv2/lv2.cpp
@@ -667,6 +668,7 @@ if(TARGET 3rdparty_vulkan)
         RSX/VK/VKGSRenderVRDev.cpp
         RSX/VK/VKOverlaysVR.cpp
         RSX/VK/VKMultiviewVR.cpp
+        RSX/VK/VKFrameGen.cpp
         RSX/VK/VKPresent.cpp
         RSX/VK/VKProgramPipeline.cpp
         RSX/VK/VKQueryPool.cpp
