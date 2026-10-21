@@ -1,4 +1,3 @@
-
 name: Sync hookmanuk upstream
 
 on:
@@ -23,10 +22,10 @@ jobs:
       - name: Checkout fork
         uses: actions/checkout@v4
         with:
-          ref: openxr
+          ref: master
           fetch-depth: 0
 
-      - name: Merge upstream changes
+      - name: Merge upstream openxr into fork master
         id: sync
         run: |
           set -euo pipefail
@@ -44,20 +43,18 @@ jobs:
           fi
 
           if git merge --no-edit upstream/openxr; then
-            if git rev-parse HEAD >/dev/null; then
-              echo "changed=true" >> "$GITHUB_OUTPUT"
-            fi
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "Upstream merge failed. Resolve conflicts before syncing."
             exit 1
           fi
 
-      - name: Push updated fork
+      - name: Push updated fork master
         if: steps.sync.outputs.changed == 'true'
-        run: git push origin openxr
+        run: git push origin HEAD:master
 
       - name: Trigger AppImage build
         if: steps.sync.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run appimage.yml --ref openxr
+        run: gh workflow run appimage.yml --ref master
