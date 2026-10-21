@@ -3,7 +3,7 @@ name: Build AppImage
 on:
   push:
     branches:
-      - openxr
+      - master
   workflow_dispatch:
 
 permissions:
@@ -30,7 +30,7 @@ jobs:
       - name: Checkout fork
         uses: actions/checkout@v4
         with:
-          ref: openxr
+          ref: master
           fetch-depth: 0
           submodules: false
 
@@ -69,7 +69,6 @@ jobs:
             exit 1
           fi
 
-          # Copy the AppImage to a fresh file owned by the runner.
           appimage="${files[0]}"
           verified="$RUNNER_TEMP/$(basename "$appimage")"
 
