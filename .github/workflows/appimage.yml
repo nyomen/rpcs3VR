@@ -2,6 +2,8 @@ name: Build AppImage
 
 on:
   push:
+    branches:
+      - openxr
   workflow_dispatch:
 
 permissions:
@@ -28,6 +30,7 @@ jobs:
       - name: Checkout fork
         uses: actions/checkout@v4
         with:
+          ref: openxr
           fetch-depth: 0
           submodules: false
 
