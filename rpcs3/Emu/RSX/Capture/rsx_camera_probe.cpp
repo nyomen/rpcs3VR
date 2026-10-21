@@ -472,7 +472,9 @@ namespace rsx::vr
 		}
 
 		// vr_profiles/<TITLE_ID>.<executable>.json for one game of a collection, else vr_profiles/<TITLE_ID>.json.
-		const std::string dir = fs::get_executable_dir() + "vr_profiles/";
+		const std::string dir = appdir
+    		? std::string(appdir) + "/usr/bin/vr_profiles/"
+    		: fs::get_executable_dir() + "vr_profiles/";
 		std::string path = dir + std::string(title_id) + ".json";
 		if (!executable.empty())
 		{
@@ -2280,7 +2282,9 @@ namespace rsx::vr
 		std::vector<std::pair<std::string, std::shared_ptr<const title_profile>>> title_profiles(std::string_view title_id)
 		{
 			std::vector<std::pair<std::string, std::shared_ptr<const title_profile>>> result;
-			const std::string dir = fs::get_executable_dir() + "vr_profiles/";
+			const std::string dir = appdir
+    			? std::string(appdir) + "/usr/bin/vr_profiles/"
+    			: fs::get_executable_dir() + "vr_profiles/";
 			for (const auto& entry : fs::dir(dir))
 			{
 				if (entry.is_directory || !entry.name.starts_with(title_id) || !entry.name.ends_with(".json"))
@@ -3253,7 +3257,9 @@ namespace rsx::vr
 			m_profile_file_check_ms = now_ms;
 			if (const std::string title = vr_title_id(); !title.empty())
 			{
-				const std::string dir = fs::get_executable_dir() + "vr_profiles/";
+				const std::string dir = appdir
+    				? std::string(appdir) + "/usr/bin/vr_profiles/"
+    				: fs::get_executable_dir() + "vr_profiles/";
 				u64 stamp = 1;
 				for (const std::string& path : {dir + title + ".json", dir + title + "." + running_executable_name() + ".json"})
 				{
