@@ -11,6 +11,7 @@
 #include "Emu/RSX/Utils/rsx_utils.h"
 #include "Emu/RSX/Overlays/overlay_message.h"
 #include "Utilities/File.h"
+#include "vr_profile_path.h"
 
 #include "util/logs.hpp"
 
@@ -679,7 +680,7 @@ namespace rsx::vr
 			json += "  \"camera_position\": {\n    \"eye_baseline\": 0.064\n  },\n\n";
 			json += "  \"stereo\": {\n    \"formula\": \"clip_x_shear\",\n    \"per_eye_separation\": 0.0,\n    \"convergence\": 1.0\n  },\n\n";
 			json += fmt::format("  \"orthographic_stereo\": {\n    \"angle\": 1.5,\n    \"convergence_z\": %.4f\n  }\n}\n", convergence_z);
-			const std::string dir = fs::get_executable_dir() + "vr_profiles/";
+			const std::string dir = vr_profiles_dir();
 			std::string path = dir + title + ".json";
 			if (const std::string executable = running_executable_name(); fs::is_file(path) && !executable.empty())
 				path = dir + title + "." + executable + ".json";
@@ -1813,7 +1814,7 @@ namespace rsx::vr
 		}
 		json += "\n}\n";
 
-		const std::string dir = fs::get_executable_dir() + "vr_profiles/";
+		const std::string dir = vr_profiles_dir();
 		// Never overwrite a title's profile: in a collection it belongs to another game (the
 		// generated one then applies to this executable only, see load_title_profile).
 		std::string path = dir + title + ".json";
