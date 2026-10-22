@@ -50,6 +50,7 @@ if [ "$DEPLOY_APPIMAGE" = "true" ]; then
             exit 1
         }
 
+        # shellcheck disable=SC2016
         patchelf --set-rpath '$ORIGIN' "$lib"
         readelf -d "$lib" | grep -E 'RPATH|RUNPATH'
     done
