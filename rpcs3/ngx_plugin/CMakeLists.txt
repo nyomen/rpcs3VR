@@ -51,9 +51,15 @@ set(DLSS_NGX_RUNTIME
 
 add_library(rpcs3_ngx SHARED rpcs3_ngx.cpp)
 
-target_include_directories(rpcs3_ngx PRIVATE
+target_include_directories(rpcs3_ngx SYSTEM PRIVATE
     "${DLSS_NGX_INCLUDE}"
 )
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(rpcs3_ngx PRIVATE
+        -Wno-error=old-style-cast
+    )
+endif()
 
 target_link_libraries(rpcs3_ngx PRIVATE
     3rdparty_vulkan
