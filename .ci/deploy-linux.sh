@@ -31,6 +31,31 @@ if [ "$DEPLOY_APPIMAGE" = "true" ]; then
 
     APPIMAGE_EXTRACT_AND_RUN=1 linuxdeploy --appdir AppDir --plugin qt --plugin checkrt
 
+    # Restore RUNPATHs: the DLSS libraries are installed together in usr/bin.
+    for lib in \
+        AppDir/usr/bin/librpcs3_ngx.so \
+        AppDir/usr/bin/libnvidia-ngx-dlss.so.* \
+        AppDir/usr/bin/libnvidia-ngx-dlssg.so.* \
+        AppDir/usr/bin/libnvidia-ngx-dlssd.so.*
+    do
+        [ -e "$lib" ] || continue
+
+        command -v patchelf >/dev/null 2>&1 || {
+            echo "ERROR: patchelf is required"
+            exit 1
+        }
+
+        command -v readelf >/dev/null 2>&1 || {
+            echo "ERROR: readelf is required"
+            exit 1
+        }
+
+        patchelf --set-rpath '$ORIGIN' "$lib"
+        readelf -d "$lib" | grep -E 'RPATH|RUNPATH'
+    done
+
+    test -f AppDir/usr/bin/librpcs3_ngx.so
+
     # Restore App Icon
     ln -sr ./AppDir/rpcs3.svg ./AppDir/.DirIcon
     

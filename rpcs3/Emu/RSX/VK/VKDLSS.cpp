@@ -681,7 +681,7 @@ namespace vk
 			return api;
 #elif defined(__linux__)
                         const std::string path =
-                                fs::get_executable_dir() + "librpcs3_ngx.so";
+                            fs::get_appimage_usr_bin_dir() + "librpcs3_ngx.so";
 
                         void* module = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
                         if (!module)

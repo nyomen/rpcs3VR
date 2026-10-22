@@ -5,6 +5,7 @@
 #include "util/shared_ptr.hpp"
 #include "bit_set.h"
 
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
@@ -658,6 +659,16 @@ namespace fs
 	const std::string& get_temp_dir();
 
 	std::string generate_neighboring_path(std::string_view source, u64 seed);
+
+	inline std::string get_appimage_usr_bin_dir()
+	{
+	    const char* appdir = std::getenv("APPDIR");
+
+	    if (appdir && *appdir)
+	        return std::string(appdir) + "/usr/bin/";
+
+	    return get_executable_dir();
+	}
 
 	// Unique pending file creation destined to be renamed to the destination file
 	struct pending_file
