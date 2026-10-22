@@ -6,6 +6,13 @@ if(TARGET 3rdparty_vulkan)
         ${CMAKE_CURRENT_LIST_DIR}/VKDLSS.cpp
         ${CMAKE_CURRENT_LIST_DIR}/VKGSRenderDLSS.cpp)
 
+    if(UNIX AND NOT APPLE)
+        add_subdirectory(
+            ${CMAKE_CURRENT_LIST_DIR}/../../../ngx_plugin
+            ${CMAKE_BINARY_DIR}/rpcs3/ngx_plugin
+        )
+    endif()
+
     # NVIDIA DLSS itself is the optional plugin rpcs3_ngx.dll (rpcs3/ngx_plugin, Windows, MSBuild): nothing of NVIDIA's is
     # linked here.
 

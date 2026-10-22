@@ -391,7 +391,13 @@ namespace
 	};
 }
 
-extern "C" __declspec(dllexport) const rpcs3_ngx_api* rpcs3_ngx_get_api()
+#if defined(_WIN32)
+#define RPCS3_NGX_EXPORT __declspec(dllexport)
+#else
+#define RPCS3_NGX_EXPORT __attribute__((visibility("default")))
+#endif
+
+extern "C" RPCS3_NGX_EXPORT const rpcs3_ngx_api* rpcs3_ngx_get_api()
 {
-	return &g_api;
+    return &g_api;
 }

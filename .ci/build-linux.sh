@@ -43,6 +43,7 @@ cmake ..                                               \
     -DCMAKE_SHARED_LINKER_FLAGS="${LINKER_FLAG}"       \
     -DCMAKE_AR="$AR"                                   \
     -DCMAKE_RANLIB="$RANLIB"                           \
+    -DDLSS_SDK="${DLSS_SDK:-}"                         \
     -DUSE_SYSTEM_CURL=ON                               \
     -DUSE_SDL=ON                                       \
     -DUSE_SYSTEM_SDL=ON                                \

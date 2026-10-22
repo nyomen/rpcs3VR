@@ -28,6 +28,8 @@
 #include "../../../ngx_plugin/rpcs3_ngx.h"
 #ifdef _WIN32
 #include <Windows.h>
+#elif defined(__linux__)
+#include <dlfcn.h>
 #endif
 
 #include <algorithm>
@@ -677,6 +679,43 @@ namespace vk
 			}
 			dlss_log.notice("DLSS plugin loaded (rpcs3_ngx.dll)");
 			return api;
+#elif defined(__linux__)
+                        const std::string path =
+                                fs::get_executable_dir() + "librpcs3_ngx.so";
+
+                        void* module = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+                        if (!module)
+                        {
+                                const char* error = dlerror();
+                                dlss_log.notice("No DLSS plugin ({}): {}",
+                                        path, error ? error : "unknown loader error");
+                                return nullptr;
+                        }
+
+                        dlerror(); // Clear any previous loader error.
+                        const auto get_api =
+                                reinterpret_cast<rpcs3_ngx_get_api_fn>(
+                                        dlsym(module, "rpcs3_ngx_get_api"));
+
+                        const char* error = dlerror();
+                        if (error || !get_api)
+                        {
+                                dlss_log.error("Cannot load DLSS plugin entry point: {}",
+                                        error ? error : "symbol not found");
+                                dlclose(module);
+                                return nullptr;
+                        }
+
+                        const rpcs3_ngx_api* api = get_api();
+                        if (!api || api->version != RPCS3_NGX_API_VERSION)
+                        {
+                                dlss_log.error("DLSS plugin interface mismatch");
+                                dlclose(module);
+                                return nullptr;
+                        }
+
+                        dlss_log.notice("DLSS plugin loaded ({})", path);
+                        return api;
 #else
 			return nullptr;
 #endif

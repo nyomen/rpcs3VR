@@ -37,6 +37,39 @@ jobs:
       - name: Prepare artifact directory
         run: mkdir -p "$BUILD_ARTIFACTSTAGINGDIRECTORY"
 
+
+      - name: Prepare NVIDIA DLSS SDK 310.9.16
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK_ROOT="$RUNNER_TEMP/dlss-sdk"
+          mkdir -p "$SDK_ROOT"
+
+          curl -fL \
+            https://github.com/NVIDIA/DLSS/archive/refs/tags/v310.9.16.zip \
+            -o "$RUNNER_TEMP/dlss-sdk.zip"
+
+          echo "418d6c685b062855f970d55d1e172eff834658a17b3483aaffddf44d5b0cb026  $RUNNER_TEMP/dlss-sdk.zip" \
+            | sha256sum --check
+
+          unzip -q "$RUNNER_TEMP/dlss-sdk.zip" -d "$SDK_ROOT"
+
+          HEADER="$(find "$SDK_ROOT" -path '*/include/nvsdk_ngx_vk.h' -print -quit)"
+          test -n "$HEADER" || {
+            echo "DLSS 310.9.16 Vulkan header missing"
+            exit 1
+          }
+
+          DLSS_SDK_DIR="${HEADER%/include/nvsdk_ngx_vk.h}"
+
+          test -f "$DLSS_SDK_DIR/lib/Linux_x86_64/libnvsdk_ngx.a"
+          test -f "$DLSS_SDK_DIR/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.310.9.16"
+          test -f "$DLSS_SDK_DIR/lib/Linux_x86_64/rel/libnvidia-ngx-dlssg.so.310.9.16"
+          test -f "$DLSS_SDK_DIR/lib/Linux_x86_64/rel/libnvidia-ngx-dlssd.so.310.9.16"
+
+          echo "DLSS_SDK_DIR=$DLSS_SDK_DIR" >> "$GITHUB_ENV"
+
       - name: Build and package AppImage
         run: |
           set -euo pipefail
@@ -53,6 +86,8 @@ jobs:
             -e ARTDIR=/root/artifacts \
             -e RELEASE_MESSAGE=/rpcs3/GitHubReleaseMessage.txt \
             -v "$BUILD_ARTIFACTSTAGINGDIRECTORY:/root/artifacts" \
+            -v "$DLSS_SDK_DIR:/root/dlss-sdk:ro" \
+            -e DLSS_SDK=/root/dlss-sdk \
             rpcs3/rpcs3-ci-jammy:2.1 \
             /rpcs3/.ci/build-linux.sh
 
