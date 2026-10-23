@@ -183,9 +183,19 @@ void vr_settings_widget::init(std::shared_ptr<emu_settings> emu_settings, const 
 			emu_settings_type::VRHudScale, ui->gb_vrHudScale, tooltips.settings.vr_hud_scale, percent_text, 5);
 		enhance_vr_slider(ui->vrDlssSharpening, ui->vrDlssSharpeningMin, ui->vrDlssSharpeningMax, ui->vrDlssSharpeningVal, ui->vrDlssSharpeningReset,
 			emu_settings_type::VRDlssSharpening, ui->gb_vrDlssSharpening, tooltips.settings.vr_dlss_sharpening, percent_text, 5);
-		// DLSS needs its plugin, rpcs3_ngx.dll beside rpcs3.exe (rpcs3/ngx_plugin): without it, DLSS is hidden and Off.
-		const bool dlss_plugin = fs::is_file(fs::get_executable_dir() + "rpcs3_ngx.dll");
+		// DLSS needs its platform-specific NGX plugin.
+		// Windows: rpcs3_ngx.dll
+		// Linux:   librpcs3_ngx.so (same path as the Linux loader in VKDLSS.cpp)
+		bool dlss_plugin = false;
+
+#if defined(_WIN32)
+		dlss_plugin = fs::is_file(fs::get_executable_dir() + "rpcs3_ngx.dll");
+#elif defined(__linux__)
+		dlss_plugin = fs::is_file(fs::get_appimage_usr_bin_dir() + "librpcs3_ngx.so");
+#endif
+
 		ui->gb_vrDlss->setVisible(dlss_plugin);
+
 		for (int i = 0; !dlss_plugin && i < ui->vrDlss->count(); i++)
 		{
 			if (ui->vrDlss->itemData(i).toList().value(1).toInt() == static_cast<int>(vr_dlss_mode::off))
