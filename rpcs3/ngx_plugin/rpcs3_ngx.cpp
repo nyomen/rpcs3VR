@@ -119,7 +119,7 @@ namespace
 		}
 		NVSDK_NGX_Result r = NVSDK_NGX_VULKAN_Init(
 			231313132ULL,
-			L".",
+			data_path,
 			instance,
 			pdev,
 			device);
