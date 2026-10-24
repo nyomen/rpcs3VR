@@ -117,8 +117,12 @@ namespace
 			};
 			common.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
 		}
-		NVSDK_NGX_Result r = NVSDK_NGX_VULKAN_Init_with_ProjectID(project_id, NVSDK_NGX_ENGINE_TYPE_CUSTOM, "1.0", data_path, instance, pdev, device,
-			gipa, gdpa, log ? &common : nullptr);
+		NVSDK_NGX_Result r = NVSDK_NGX_VULKAN_Init(
+			231313132ULL,
+			L".",
+			instance,
+			pdev,
+			device);
 		if (NVSDK_NGX_FAILED(r))
 		{
 			return result(r);
