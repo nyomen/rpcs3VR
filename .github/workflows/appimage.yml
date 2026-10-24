@@ -38,7 +38,7 @@ jobs:
         run: mkdir -p "$BUILD_ARTIFACTSTAGINGDIRECTORY"
 
 
-      - name: Prepare NVIDIA DLSS SDK 310.9.16
+      - name: Prepare NVIDIA DLSS SDK 310.7.0
         shell: bash
         run: |
           set -euo pipefail
@@ -47,26 +47,26 @@ jobs:
           mkdir -p "$SDK_ROOT"
 
           curl -fL \
-            https://github.com/NVIDIA/DLSS/archive/refs/tags/v310.9.16.zip \
+            https://github.com/NVIDIA/DLSS/archive/refs/tags/v310.7.0.zip \
             -o "$RUNNER_TEMP/dlss-sdk.zip"
 
-          echo "418d6c685b062855f970d55d1e172eff834658a17b3483aaffddf44d5b0cb026  $RUNNER_TEMP/dlss-sdk.zip" \
+          echo "2142ca1b2e90be90dba2395e806fb00281afa2d7d93bd7e0439f58eb36f5605a  $RUNNER_TEMP/dlss-sdk.zip" \
             | sha256sum --check
 
           unzip -q "$RUNNER_TEMP/dlss-sdk.zip" -d "$SDK_ROOT"
 
           HEADER="$(find "$SDK_ROOT" -path '*/include/nvsdk_ngx_vk.h' -print -quit)"
           test -n "$HEADER" || {
-            echo "DLSS 310.9.16 Vulkan header missing"
+            echo "DLSS 310.7.0 Vulkan header missing"
             exit 1
           }
 
           DLSS_SDK_DIR="${HEADER%/include/nvsdk_ngx_vk.h}"
 
           test -f "$DLSS_SDK_DIR/lib/Linux_x86_64/libnvsdk_ngx.a"
-          test -f "$DLSS_SDK_DIR/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.310.9.16"
-          test -f "$DLSS_SDK_DIR/lib/Linux_x86_64/rel/libnvidia-ngx-dlssg.so.310.9.16"
-          test -f "$DLSS_SDK_DIR/lib/Linux_x86_64/rel/libnvidia-ngx-dlssd.so.310.9.16"
+          test -f "$DLSS_SDK_DIR/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.310.7.0"
+          test -f "$DLSS_SDK_DIR/lib/Linux_x86_64/rel/libnvidia-ngx-dlssg.so.310.7.0"
+          test -f "$DLSS_SDK_DIR/lib/Linux_x86_64/rel/libnvidia-ngx-dlssd.so.310.7.0"
 
           echo "DLSS_SDK_DIR=$DLSS_SDK_DIR" >> "$GITHUB_ENV"
 
