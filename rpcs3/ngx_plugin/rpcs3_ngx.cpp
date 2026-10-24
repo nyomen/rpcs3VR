@@ -159,10 +159,24 @@ namespace
 		{
 			return result(NVSDK_NGX_Result_FAIL_NotInitialized);
 		}
+
 		int a = 0, n = 0, i = 0;
-		NVSDK_NGX_Parameter_GetI(g_caps, NVSDK_NGX_Parameter_SuperSampling_Available, &a);
-		NVSDK_NGX_Parameter_GetI(g_caps, NVSDK_NGX_Parameter_SuperSampling_NeedsUpdatedDriver, &n);
-		NVSDK_NGX_Parameter_GetI(g_caps, NVSDK_NGX_Parameter_SuperSampling_FeatureInitResult, &i);
+
+		const auto ra = NVSDK_NGX_Parameter_GetI(
+		    g_caps, NVSDK_NGX_Parameter_SuperSampling_Available, &a);
+		const auto rn = NVSDK_NGX_Parameter_GetI(
+		    g_caps, NVSDK_NGX_Parameter_SuperSampling_NeedsUpdatedDriver, &n);
+		const auto ri = NVSDK_NGX_Parameter_GetI(
+		    g_caps, NVSDK_NGX_Parameter_SuperSampling_FeatureInitResult, &i);
+
+		if (g_log)
+		{
+		    g_log("NGX DLSS capabilities: Available=%d (result=0x%08x), NeedsUpdatedDriver=%d (result=0x%08x), FeatureInitResult=0x%08x (result=0x%08x)",
+		        a, static_cast<unsigned int>(ra),
+		        n, static_cast<unsigned int>(rn),
+		        static_cast<unsigned int>(i), static_cast<unsigned int>(ri));
+		}
+
 		*available = a;
 		*needs_driver = n;
 		*init_result = i;
