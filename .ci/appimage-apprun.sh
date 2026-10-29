@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -e
+
+this_dir="$(readlink -f "$(dirname "$0")")"
+
+# Preserve the runtime environment setup created by linuxdeploy.
+source "$this_dir/apprun-hooks/linuxdeploy-plugin-checkrt.sh"
+
+# Install bundled per-game patches without overwriting user files.
+patches_source="$this_dir/usr/bin/patches"
+patches_target="${XDG_CONFIG_HOME:-$HOME/.config}/rpcs3/patches"
+
+if [[ -d "$patches_source" ]]; then
+    mkdir -p "$patches_target"
+
+    for patch_file in "$patches_source"/*_patch.yml; do
+        [[ -f "$patch_file" ]] || continue
+
+        target_file="$patches_target/$(basename "$patch_file")"
+
+        if [[ ! -e "$target_file" ]]; then
+            cp -- "$patch_file" "$target_file"
+        fi
+    done
+fi
+
+exec "$this_dir/AppRun.wrapped" "$@"

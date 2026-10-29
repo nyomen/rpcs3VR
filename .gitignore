@@ -137,3 +137,5 @@ CMakeUserPresets.json
 
 # claude
 CLAUDE.md
+artifacts/*
+GitHubReleaseMessage.txt

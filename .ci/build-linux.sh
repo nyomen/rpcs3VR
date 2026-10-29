@@ -11,6 +11,14 @@ git config --global --add safe.directory '*'
 # shellcheck disable=SC2046
 git submodule -q update --init $(awk '/path/ && !/llvm/ && !/opencv/ && !/libsdl-org/ && !/curl/ && !/zlib/ { print $3 }' .gitmodules)
 
+if [ "${DEPLOY_APPIMAGE:-false}" = "true" ]; then
+   if [ ! -f /dlss-sdk/include/nvsdk_ngx_vk.h ] ||
+      [ ! -f /dlss-sdk/lib/Linux_x86_64/libnvsdk_ngx.a ]; then
+      echo "ERROR: Verified NVIDIA DLSS SDK not mounted at /dlss-sdk." >&2
+      exit 1
+   fi
+fi
+
 mkdir build && cd build || exit 1
 
 if [ "$COMPILER" = "gcc" ]; then
@@ -54,6 +62,7 @@ cmake ..                                               \
     -DSTATIC_LINK_LLVM=ON                              \
     -DBUILD_RPCS3_TESTS="${RUN_UNIT_TESTS}"            \
     -DRUN_RPCS3_TESTS="${RUN_UNIT_TESTS}"              \
+    -DDLSS_SDK_ROOT=/dlss-sdk \
     -G Ninja
 
 ninja; build_status=$?;

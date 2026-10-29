@@ -6,7 +6,8 @@
 #include "bit_set.h"
 
 #include <memory>
-#include <string>
+#include <cstdlib>  // std::getenv
+#include <string>   // std::string
 #include <vector>
 #include <algorithm>
 
@@ -644,6 +645,16 @@ namespace fs
 
 	// Get executable containing directory
 	std::string get_executable_dir();
+
+	inline std::string get_appimage_usr_bin_dir()
+	{
+	    const char* appdir = std::getenv("APPDIR");
+
+	    if (appdir && *appdir)
+	        return std::string(appdir) + "/usr/bin/";
+
+	    return fs::get_executable_dir();
+	}
 
 	// Get configuration directory. Set get_config_subdirectory to true to get the nested config dir on windows.
 	const std::string& get_config_dir(bool get_config_subdirectory = false);

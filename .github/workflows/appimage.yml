@@ -34,6 +34,18 @@ jobs:
           fetch-depth: 0
           submodules: false
 
+      - name: Cache NVIDIA DLSS SDK
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rpcs3vr
+          key: dlss-sdk-310.9.16-f0de83ec7045778bc9ed456229379caaae8bc81ae3b0d5fd8ec9645c71df489d
+
+      - name: Download and verify NVIDIA DLSS SDK
+        run: |
+          set -euo pipefail
+          SDK_DIR="$(.ci/prepare-dlss-sdk.sh)"
+          echo "DLSS_SDK_DIR=$SDK_DIR" >> "$GITHUB_ENV"
+
       - name: Prepare artifact directory
         run: mkdir -p "$BUILD_ARTIFACTSTAGINGDIRECTORY"
 
@@ -45,6 +57,7 @@ jobs:
 
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/rpcs3" \
+           -v "$DLSS_SDK_DIR:/dlss-sdk:ro" \
             --env-file .ci/docker.env \
             -e DEPLOY_APPIMAGE=true \
             -e COMPILER=clang \

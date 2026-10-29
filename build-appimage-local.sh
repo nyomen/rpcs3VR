@@ -14,6 +14,9 @@ podman image exists "$IMAGE" || {
     exit 1
 }
 
+DLSS_SDK_DIR="$("$REPO/.ci/prepare-dlss-sdk.sh")"
+echo "Verifiziertes DLSS SDK: $DLSS_SDK_DIR"
+
 mkdir -p "$REPO/artifacts"
 
 echo "=== RPCS3-VR AppImage-Build ==="
@@ -21,6 +24,7 @@ echo "Repository: $REPO"
 
 podman run --rm \
     -v "$REPO:/rpcs3:Z" \
+    -v "$DLSS_SDK_DIR:/dlss-sdk:ro,Z" \
     -w / \
     -e DEPLOY_APPIMAGE=true \
     -e BUILD_ARTIFACTSTAGINGDIRECTORY=/rpcs3/artifacts \
@@ -47,6 +51,7 @@ podman run --rm \
             )
 
             cd /rpcs3/build
+            cmake .. -DDLSS_SDK_ROOT=/dlss-sdk
             ninja
 
             cd /rpcs3
@@ -70,6 +75,7 @@ podman run --rm \
         fi
 
         chmod +x "${outputs[@]}"
+        rm -f /rpcs3/build/*.AppImage
 
         echo "=== Erfolgreich erstellte AppImage(s) ==="
         ls -lh "${outputs[@]}"

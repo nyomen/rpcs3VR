@@ -26,6 +26,8 @@
 
 // NVIDIA DLSS runs in the optional plugin rpcs3_ngx.dll (MIT, rpcs3/ngx_plugin): this file has no NVIDIA code.
 #include "../../../ngx_plugin/rpcs3_ngx.h"
+#include "util/dyn_lib.hpp"
+
 #ifdef _WIN32
 #include <Windows.h>
 #endif
@@ -655,33 +657,50 @@ namespace vk
 
 	const rpcs3_ngx_api* ngx_plugin()
 	{
-		static const rpcs3_ngx_api* s_api = []() -> const rpcs3_ngx_api*
-		{
+	    static utils::dynamic_library module;
+	    static const rpcs3_ngx_api* s_api = [&]() -> const rpcs3_ngx_api*
+	    {
 #ifdef _WIN32
-			wchar_t exe_path[MAX_PATH]{};
-			GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
-			std::wstring path(exe_path);
-			path = path.substr(0, path.find_last_of(L"\\/") + 1) + L"rpcs3_ngx.dll";
-			const HMODULE module = LoadLibraryW(path.c_str());
-			if (!module)
-			{
-				dlss_log.notice("No DLSS plugin (rpcs3_ngx.dll): DLSS is unavailable");
-				return nullptr;
-			}
-			const auto get_api = reinterpret_cast<rpcs3_ngx_get_api_fn>(GetProcAddress(module, "rpcs3_ngx_get_api"));
-			const rpcs3_ngx_api* api = get_api ? get_api() : nullptr;
-			if (!api || api->version != RPCS3_NGX_API_VERSION)
-			{
-				dlss_log.error("rpcs3_ngx.dll is from another build (interface %u, this build needs %u): DLSS is unavailable", api ? api->version : 0, RPCS3_NGX_API_VERSION);
-				return nullptr;
-			}
-			dlss_log.notice("DLSS plugin loaded (rpcs3_ngx.dll)");
-			return api;
+	        wchar_t exe_path[MAX_PATH]{};
+	        GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+	        std::wstring path(exe_path);
+	        path = path.substr(0, path.find_last_of(L"\\/") + 1) + L"rpcs3_ngx.dll";
+
+	        if (!module.load(path))
+	        {
+	            dlss_log.notice("No DLSS plugin (rpcs3_ngx.dll): DLSS is unavailable");
+	            return nullptr;
+	        }
+
+	        dlss_log.notice("Loading DLSS plugin (rpcs3_ngx.dll)");
 #else
-			return nullptr;
+	        const std::string path = fs::get_appimage_usr_bin_dir() + "librpcs3_ngx.so";
+
+	        if (!module.load(path))
+	        {
+	            dlss_log.notice("No DLSS plugin (librpcs3_ngx.so): DLSS is unavailable - Expected it here: %s", path.c_str());
+	            return nullptr;
+	        }
+
+	        dlss_log.notice("Loading DLSS plugin (librpcs3_ngx.so)");
 #endif
-		}();
-		return s_api;
+
+	        const auto get_api = module.get<rpcs3_ngx_get_api_fn>("rpcs3_ngx_get_api");
+	        const rpcs3_ngx_api* api = get_api ? get_api() : nullptr;
+
+	        if (!api || api->version != RPCS3_NGX_API_VERSION)
+	        {
+	            dlss_log.error("DLSS plugin has an incompatible interface (interface %u, this build needs %u)",
+	                api ? api->version : 0, RPCS3_NGX_API_VERSION);
+	            module.close();
+	            return nullptr;
+	        }
+
+	        dlss_log.notice("DLSS plugin loaded successfully");
+	        return api;
+	    }();
+
+	    return s_api;
 	}
 
 	namespace

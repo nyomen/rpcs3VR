@@ -6,8 +6,34 @@ if(TARGET 3rdparty_vulkan)
         ${CMAKE_CURRENT_LIST_DIR}/VKDLSS.cpp
         ${CMAKE_CURRENT_LIST_DIR}/VKGSRenderDLSS.cpp)
 
-    # NVIDIA DLSS itself is the optional plugin rpcs3_ngx.dll (rpcs3/ngx_plugin, Windows, MSBuild): nothing of NVIDIA's is
-    # linked here.
+    # Optional NVIDIA NGX plugin for Linux DLSS Super Resolution.
+    if(UNIX AND NOT APPLE)
+        set(DLSS_SDK_ROOT "" CACHE PATH "Path to the NVIDIA DLSS SDK root")
+        if(DLSS_SDK_ROOT AND
+           EXISTS "${DLSS_SDK_ROOT}/include/nvsdk_ngx_vk.h" AND
+           EXISTS "${DLSS_SDK_ROOT}/lib/Linux_x86_64/libnvsdk_ngx.a")
+            add_library(rpcs3_ngx SHARED
+                ${CMAKE_CURRENT_LIST_DIR}/../../../ngx_plugin/rpcs3_ngx_linux.cpp
+            )
+            target_include_directories(rpcs3_ngx PRIVATE
+                "${DLSS_SDK_ROOT}/include"
+                "${CMAKE_CURRENT_LIST_DIR}/../../../ngx_plugin"
+            )
+            target_link_libraries(rpcs3_ngx PRIVATE
+                "${DLSS_SDK_ROOT}/lib/Linux_x86_64/libnvsdk_ngx.a"
+                3rdparty_vulkan
+                ${CMAKE_DL_LIBS}
+            )
+            set_target_properties(rpcs3_ngx PROPERTIES
+                OUTPUT_NAME "rpcs3_ngx"
+                CXX_VISIBILITY_PRESET hidden
+                VISIBILITY_INLINES_HIDDEN YES
+            )
+        else()
+            message(STATUS
+                "Linux NGX plugin disabled: set DLSS_SDK_ROOT to the NVIDIA DLSS SDK directory")
+        endif()
+    endif()
 
     option(BUILD_DLSS_SELFTEST "Build the DLSS motion vector self-test (dlss_selftest)" OFF)
     if(BUILD_DLSS_SELFTEST AND X11_FOUND)

@@ -7,9 +7,24 @@ CPU_ARCH="${1:-x86_64}"
 if [ "$DEPLOY_APPIMAGE" = "true" ]; then
     DESTDIR=AppDir ninja install
 
+    # Package the optional Linux NGX plugin beside the RPCS3 executable.
+    if [ -f "rpcs3/Emu/librpcs3_ngx.so" ]; then
+        install -D -m 755 \
+            "rpcs3/Emu/librpcs3_ngx.so" \
+            "AppDir/usr/bin/librpcs3_ngx.so"
+        echo "Packaged Linux NGX plugin."
+    else
+        echo "Linux NGX plugin not built; DLSS will be unavailable."
+    fi
+
     # Package VR profiles and documentation.
     mkdir -p AppDir/usr/bin/vr_profiles
     cp -a ../bin/vr_profiles/. AppDir/usr/bin/vr_profiles/
+    # Package per-title game patches.
+    mkdir -p AppDir/usr/bin/patches
+    cp -a ../bin/patches/*_patch.yml AppDir/usr/bin/patches/
+    test -f AppDir/usr/bin/patches/BCUS98114_patch.yml
+
     
     cp ../vr-games.md ../vr-settings.md AppDir/usr/bin/
     
@@ -30,6 +45,48 @@ if [ "$DEPLOY_APPIMAGE" = "true" ]; then
     export EXTRA_QT_PLUGINS="svg;wayland-decoration-client;wayland-graphics-integration-client;wayland-shell-integration;waylandcompositor"
 
     APPIMAGE_EXTRACT_AND_RUN=1 linuxdeploy --appdir AppDir --plugin qt --plugin checkrt
+
+    # Install the custom AppRun after linuxdeploy.
+    install -m 0755 ../.ci/appimage-apprun.sh AppDir/AppRun
+
+    # Bundle the original, unmodified NVIDIA DLSS feature module.
+    # Copy it only after linuxdeploy to avoid modifying the signed library.
+    if [ "$CPU_ARCH" = "x86_64" ]; then
+        NGX_DIR="../rpcs3/ngx_plugin/redistributables"
+        NGX_LIB="libnvidia-ngx-dlss.so.310.9.16"
+        NGX_NOTICE="DLSS-Third-Party-Notices.txt"
+        NGX_TARGET="AppDir/usr/bin/$NGX_LIB"
+
+        # Verify the checked-in source file against the pinned original hash.
+        (
+            cd "$NGX_DIR"
+            sha256sum -c "$NGX_LIB.sha256"
+        )
+
+        # Copy the feature module beside the RPCS3 executable.
+        install -D -m 0644 "$NGX_DIR/$NGX_LIB" "$NGX_TARGET"
+
+        # Verify that packaging did not change the module bytes.
+        NGX_SOURCE_SHA256="$(sha256sum "$NGX_DIR/$NGX_LIB" | awk '{print $1}')"
+        NGX_TARGET_SHA256="$(sha256sum "$NGX_TARGET" | awk '{print $1}')"
+
+        if [ "$NGX_SOURCE_SHA256" != "$NGX_TARGET_SHA256" ]; then
+            echo "ERROR: DLSS module SHA-256 changed during packaging!" >&2
+            exit 1
+        fi
+
+        echo "DLSS module SHA-256 verified: $NGX_TARGET_SHA256"
+
+        # Include the NVIDIA-required third-party notices in the AppImage.
+        if [ ! -s "$NGX_DIR/$NGX_NOTICE" ]; then
+            echo "ERROR: Missing NVIDIA DLSS third-party notices: $NGX_DIR/$NGX_NOTICE" >&2
+            exit 1
+        fi
+
+        install -D -m 0644 \
+            "$NGX_DIR/$NGX_NOTICE" \
+            "AppDir/usr/share/doc/rpcs3/$NGX_NOTICE"
+    fi
 
     # Restore App Icon
     ln -sr ./AppDir/rpcs3.svg ./AppDir/.DirIcon

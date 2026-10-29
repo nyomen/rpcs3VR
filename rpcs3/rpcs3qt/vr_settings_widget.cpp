@@ -53,6 +53,16 @@ void vr_settings_widget::init(std::shared_ptr<emu_settings> emu_settings, const 
 	subscribe_tooltip(ui->gb_vrFrameGenMultiplier, tooltips.settings.vr_framegen_multiplier);
 	m_emu_settings->EnhanceComboBox(ui->vrFrameGenMotion, emu_settings_type::VRFrameGenMotion);
 	subscribe_tooltip(ui->gb_vrFrameGenMotion, tooltips.settings.vr_framegen_motion);
+#ifdef __linux__
+	// The Linux NGX plugin does not support DLSS Frame Generation.
+	ui->vrFrameGeneration->setChecked(false);
+	ui->vrFrameGeneration->setEnabled(false);
+	ui->vrFrameGeneration->setToolTip(tr("DLSS Frame Generation is not supported by the current Linux NGX plugin."));
+	ui->gb_vrFrameGenMultiplier->setEnabled(false);
+	ui->gb_vrFrameGenMultiplier->setToolTip(tr("DLSS Frame Generation is not supported by the current Linux NGX plugin."));
+	ui->gb_vrFrameGenMotion->setEnabled(false);
+	ui->gb_vrFrameGenMotion->setToolTip(tr("DLSS Frame Generation is not supported by the current Linux NGX plugin."));
+#endif
 	// DLSS (experimental): set before boot it makes the DLSS context for the session; the home menu then changes the
 	// mode and model live (2026-10-13; parked and hidden 2026-10-11 for MotorStorm's menus and intro).
 	subscribe_tooltip(ui->gb_vrCinematicScenes, tooltips.settings.vr_cinematic_scenes);
@@ -183,8 +193,12 @@ void vr_settings_widget::init(std::shared_ptr<emu_settings> emu_settings, const 
 			emu_settings_type::VRHudScale, ui->gb_vrHudScale, tooltips.settings.vr_hud_scale, percent_text, 5);
 		enhance_vr_slider(ui->vrDlssSharpening, ui->vrDlssSharpeningMin, ui->vrDlssSharpeningMax, ui->vrDlssSharpeningVal, ui->vrDlssSharpeningReset,
 			emu_settings_type::VRDlssSharpening, ui->gb_vrDlssSharpening, tooltips.settings.vr_dlss_sharpening, percent_text, 5);
-		// DLSS needs its plugin, rpcs3_ngx.dll beside rpcs3.exe (rpcs3/ngx_plugin): without it, DLSS is hidden and Off.
+		// DLSS needs its optional platform-specific plugin beside the executable.
+#ifdef _WIN32
 		const bool dlss_plugin = fs::is_file(fs::get_executable_dir() + "rpcs3_ngx.dll");
+#else
+		const bool dlss_plugin = fs::is_file(fs::get_appimage_usr_bin_dir() + "librpcs3_ngx.so");
+#endif
 		ui->gb_vrDlss->setVisible(dlss_plugin);
 		for (int i = 0; !dlss_plugin && i < ui->vrDlss->count(); i++)
 		{
